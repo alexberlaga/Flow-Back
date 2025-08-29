@@ -1,8 +1,12 @@
 ### input directory to pdbs/trajs and return N generated samples of each ###
 
-import sys, os
-sys.path.append('../')
-sys.path.append('./utils/')
+import os
+import sys
+from pathlib import Path
+
+# allow imports from src
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / "src"))
 
 import argparse
 import glob
@@ -10,9 +14,14 @@ import pickle as pkl
 from tqdm import tqdm
 import time
 import datetime
+import numpy as np
+import torch
+import mdtraj as md
+
+from file_config import DATA_DIR, MODELS_DIR, OUTPUTS_DIR
 
 # need to test these for preproccessing
-from eval_utils import * 
+from eval_utils import *
 
 # import functions to check and correct chirality
 from chi_utils import *
@@ -29,7 +38,7 @@ parser.add_argument('--check_bonds', action='store_true',  help='Calculate bond 
 parser.add_argument('--check_div', action='store_true',  help='Calculate diversity score (for multi-gen)')
 parser.add_argument('--mask_prior', action='store_true',  help='Enforce CG positions remain the same')
 parser.add_argument('--retain_AA', action='store_true',  help='Hold AA positions for scoring')
-parser.add_argument('--model_path', default='../models/Pro_pretrained', type=str, help='Trained model')
+parser.add_argument('--model_path', default=str(MODELS_DIR / 'Pro_pretrained'), type=str, help='Trained model')
 parser.add_argument('--tolerance', default=3e-5, type=float, help='Tolerance if using NN solver')
 parser.add_argument('--nsteps', default=100, type=int, help='Number of steps in Euler integrator')
 parser.add_argument('--system', default='pro', type=str, help='Pro or DNAPro CG input')
@@ -42,9 +51,9 @@ parser.add_argument('--t_flip', default=0.2, type=float,  help='ODE time to corr
 parser.add_argument('--type_flip', type=str, default='ref-ter', help='Method used to fix chirality')
 
 args = parser.parse_args()
-load_dir = args.load_dir
+load_name = args.load_dir
 CG_noise = args.CG_noise
-model_path = args.model_path
+model_path = Path(args.model_path)
 ckp = args.ckp
 n_gens = args.n_gens
 solver = args.solver
@@ -63,19 +72,20 @@ vram = args.vram
 save_traj = args.save_traj
 save_dcd = args.save_dcd
 
-save_dir = f'../outputs/{load_dir}'
-load_dir = f'../data/{load_dir}'
+save_dir = OUTPUTS_DIR / load_name
+load_dir = DATA_DIR / load_name
 
 # remove mask and nsteps to simplify naming
+model_name = model_path.name
 if solver == 'euler':
-    save_prefix = f'{save_dir}/{model_path.split("/")[-1]}_ckp-{ckp}_noise-{CG_noise}/'
+    save_prefix = save_dir / f'{model_name}_ckp-{ckp}_noise-{CG_noise}'
 elif solver == 'euler_chi':
-    save_prefix = f'{save_dir}/{model_path.split("/")[-1]}_ckp-{ckp}_noise-{CG_noise}_chi-fix-{t_flip}/'
+    save_prefix = save_dir / f'{model_name}_ckp-{ckp}_noise-{CG_noise}_chi-fix-{t_flip}'
 elif solver == 'adapt':
-    save_prefix = f'{save_dir}/{model_path.split("/")[-1]}_ckp-{ckp}_noise-{CG_noise}_tol-{tol}/'
+    save_prefix = save_dir / f'{model_name}_ckp-{ckp}_noise-{CG_noise}_tol-{tol}'
 
 if mask_prior:
-    save_prefix = save_prefix[:-1] + '_masked/'
+    save_prefix = Path(str(save_prefix) + '_masked')
 os.makedirs(save_prefix, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -84,9 +94,9 @@ print(device)
 # add optional preprocessing to save files -- skip if already cleaned
 if system == 'pro':
     if retain_AA:
-        load_dir = process_pro_aa(load_dir)
+        load_dir = Path(process_pro_aa(load_dir))
     else:
-        load_dir = process_pro_cg(load_dir)
+        load_dir = Path(process_pro_cg(load_dir))
 elif system == 'DNApro':
     if retain_AA:
         # accounted for in featurization
@@ -110,7 +120,7 @@ bf_list, clash_list, div_list = [], [], []
 # save time for inference as a function of size -- over n-res?
 time_list, res_list = [], []
 
-trj_list = sorted(glob.glob(f'{load_dir}/*.pdb'))
+trj_list = sorted(glob.glob(str(load_dir / '*.pdb')))
 print(f'Found {len(trj_list)} trajs to backmap')
 
 for trj_name in tqdm(trj_list, desc='Iterating over trajs'):
@@ -223,38 +233,38 @@ for trj_name in tqdm(trj_list, desc='Iterating over trajs'):
         div_list.append(div_frames)
 
     # save gen using same pdb name -- currently saving as n_frames * n_gens
-    save_name = f'{save_prefix}{trj_name.split("/")[-1]}'
-          
+    save_name = save_prefix / Path(trj_name).name
+
     # if saving dt, only save a single gen
     if save_traj:
-        save_i = save_name.replace('.pdb', f'_dt.pdb')
-        trj_gens.save_pdb(save_i)
+        save_i = save_name.with_name(save_name.stem + '_dt.pdb')
+        trj_gens.save_pdb(str(save_i))
     else:
         for i in range(n_gens):
-            save_i = save_name.replace('.pdb', f'_{i+1}.pdb')
+            save_i = save_name.with_name(f'{save_name.stem}_{i+1}.pdb')
             if save_dcd:
-                trj_gens[i*n_frames].save_pdb(save_i)
-                trj_gens[i*n_frames].save_dcd(save_i.replace('.pdb', '.dcd'))
+                trj_gens[i*n_frames].save_pdb(str(save_i))
+                trj_gens[i*n_frames].save_dcd(str(save_i.with_suffix('.dcd')))
             else:
-                trj_gens[i*n_frames:(i+1)*n_frames].save_pdb(save_i)
+                trj_gens[i*n_frames:(i+1)*n_frames].save_pdb(str(save_i))
 
 # save all scores to same dir
 if check_bonds:
-    np.save(f'{save_prefix}bf.npy', np.array(bf_list))
+    np.save(save_prefix / 'bf.npy', np.array(bf_list))
     print('mean bf: ', np.mean(bf_list))
 if check_clash:
-    np.save(f'{save_prefix}cls.npy', np.array(clash_list)) 
+    np.save(save_prefix / 'cls.npy', np.array(clash_list))
     print('mean cls: ', np.mean(clash_list))
 if check_div:
-    np.save(f'{save_prefix}div.npy', np.array(div_list)) 
+    np.save(save_prefix / 'div.npy', np.array(div_list))
     print('mean div: ', np.mean(div_list))
           
 # save ordered list of trajs
-with open(f'{save_prefix}trj_list.pkl', "wb") as output_file:
+with open(save_prefix / 'trj_list.pkl', "wb") as output_file:
     pkl.dump(trj_list, output_file)
      
 try:
-    np.save(f'{save_prefix}time_gen-{n_gens}.npy', np.array([res_list, time_list]))     
+    np.save(save_prefix / f'time_gen-{n_gens}.npy', np.array([res_list, time_list]))
 except:
     pass
 

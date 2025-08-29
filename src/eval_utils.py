@@ -1,11 +1,15 @@
 #from egnn_utils import *
 
-import sys, os
-sys.path.append('../../')
-from utils import *
-
+import os
 import glob
-import pickle as pkl 
+import pickle as pkl
+from pathlib import Path
+
+from model_utils import *
+from file_config import SIDECHAINNET_TEST_DIR, TEMP_DIR
+import numpy as np
+import mdtraj as md
+from tqdm import tqdm
 
 from sidechainnet.structure.build_info import NUM_COORDS_PER_RES, SC_BUILD_INFO
 from sidechainnet.utils.sequence import ONE_TO_THREE_LETTER_MAP
@@ -23,7 +27,8 @@ def process_pro_aa(load_dir, stride=1):
     '''Re-order and clean all-atom trajectory prior to inference
        Retain xyz position for use as a reference against generated structures
        Should resave pdb + xtc by default'''
-    
+
+    load_dir = str(load_dir)
     save_dir = load_dir + '_clean_AA'
     
     # skip straight to inference if data already cleaned
@@ -97,8 +102,10 @@ def process_pro_aa(load_dir, stride=1):
         xyz = aa_trj.xyz[:, np.array(idx_list)]
 
         # save txt as temporary pdb and load new molecules
-        open('.temp.pdb', 'w').write(aa_pdb)
-        trj_aa_fix = md.load('.temp.pdb')
+        temp_pdb = TEMP_DIR / '.temp.pdb'
+        TEMP_DIR.mkdir(exist_ok=True)
+        open(temp_pdb, 'w').write(aa_pdb)
+        trj_aa_fix = md.load(str(temp_pdb))
         trj_aa_fix = md.Trajectory(xyz, topology=trj_aa_fix.top)
 
         # save pdb -- save as dcd if longer than
@@ -111,7 +118,8 @@ def process_pro_aa(load_dir, stride=1):
 
 def process_pro_cg(load_dir, stride=1):
     '''Retain Ca positions only and initializes all other atoms positions to 0,0,0'''
-    
+
+    load_dir = str(load_dir)
     save_dir = load_dir + '_clean'
     
     # skip straight to inference if data already cleaned
@@ -192,8 +200,10 @@ def process_pro_cg(load_dir, stride=1):
         xyz[:, np.array(ca_idxs)] = cg_xyz
 
         # save txt as temporary pdb and load new molecules
-        open('.temp.pdb', 'w').write(aa_pdb)
-        trj_aa_fix = md.load('.temp.pdb')
+        temp_pdb = TEMP_DIR / '.temp.pdb'
+        TEMP_DIR.mkdir(exist_ok=True)
+        open(temp_pdb, 'w').write(aa_pdb)
+        trj_aa_fix = md.load(str(temp_pdb))
         trj_aa_fix = md.Trajectory(xyz, topology=trj_aa_fix.top)
 
         # save pdb
@@ -202,7 +212,7 @@ def process_pro_cg(load_dir, stride=1):
               
     return save_dir
 
-def process_dna_cg(pdb, dcd=None, pro_trj=None, save_path='./sidechainnet_data/test', stride=1, bsp_reorder=False):
+def process_dna_cg(pdb, dcd=None, pro_trj=None, save_path=SIDECHAINNET_TEST_DIR, stride=1, bsp_reorder=False):
     '''Write a blank pdb for the dna coords -- keep the CG section the same as ref'''
     
     standard_order = {
@@ -329,7 +339,7 @@ def process_dna_cg(pdb, dcd=None, pro_trj=None, save_path='./sidechainnet_data/t
         
     # save pdb
     if save_path is not None:
-        comb_trj.save_pdb(save_path)
+        comb_trj.save_pdb(str(save_path))
     
     return aa_trj
 

@@ -14,36 +14,36 @@ conda install conda-forge::tqdm
 ```
 
 ### Testing:
+Run evaluation directly from the project root:
 ```
-cd ./scripts
-python eval.py --n_gens 1 --load_dir PDB_example --mask_prior
+python scripts/eval.py --n_gens 1 --load_dir PDB_example --mask_prior
 ```
 
 # Inference
 
-Generates 5 samples of each CG trace in ./data/PDB_test_CG directory
+Generates 5 samples of each CG trace in the configured data directory
 ```
-python eval.py --n_gens 5 --load_dir PDB_example --mask_prior
+python scripts/eval.py --n_gens 5 --load_dir PDB_example --mask_prior
 ```
 Generates samples and computes bond, clash, and diversity score with respect to AA references
 ```
-python eval.py --n_gens 5 --load_dir PDB_example --retain_AA --check_bonds --check_clash --check_div  --mask_prior
+python scripts/eval.py --n_gens 5 --load_dir PDB_example --retain_AA --check_bonds --check_clash --check_div  --mask_prior
 ```
 Backmap samples using noisier initial distribution to increase diversity
 ```
-python eval.py --n_gens 5 --load_dir PDB_example --mask_prior --CG_noise 0.005
+python scripts/eval.py --n_gens 5 --load_dir PDB_example --mask_prior --CG_noise 0.005
 ```
 Backmap short (10 frame) CG trajectory containing only C-alphas atoms
 ```
-python eval.py --n_gens 3 --load_dir pro_traj_example --mask_prior
+python scripts/eval.py --n_gens 3 --load_dir pro_traj_example --mask_prior
 ```
 Backmap DNA-protein residues --ckp 900 is recommended
 ```
-python eval.py --n_gens 5 --system DNApro --load_dir DNApro_example --model_path ../models/DNAPro_pretrained --ckp 900 --mask_prior --retain_AA
+python scripts/eval.py --n_gens 5 --system DNApro --load_dir DNApro_example --model_path models/DNAPro_pretrained --ckp 900 --mask_prior --retain_AA
 ```
 Backmapping DNA-protein CG trajectory
 ```
-python eval.py --n_gens 3 --system DNApro --load_dir DNApro_traj_example --model_path ../models/DNAPro_pretrained --ckp 900 --mask_prior
+python scripts/eval.py --n_gens 3 --system DNApro --load_dir DNApro_traj_example --model_path models/DNAPro_pretrained --ckp 900 --mask_prior
 ```
 
 # Training
@@ -57,21 +57,22 @@ Unzip and move train_features directory in working directory.
 Train protein model using default parameters:
 
 ```
-python train.py --system pro --load_path ./train_features/feats_pro_0-1000_all_max-8070.pkl
+python scripts/train.py --system pro --load_path train_features/feats_pro_0-1000_all_max-8070.pkl
 ```
 
 Train DNA-protein model:
 
 ```
-python train.py --system DNApro --load_path ./train_features/feats_DNAPro_DNA-range_10-120_pro-range_10-500.pkl'
+python scripts/train.py --system DNApro --load_path train_features/feats_DNAPro_DNA-range_10-120_pro-range_10-500.pkl'
 ```
 
 ### Re-train with new PDBs
 
 ```
-cd scripts
-python featurize_pro.py --pdb_dir ../train_PDBs/ --save_name pro-train
+python scripts/featurize_pro.py --pdb_dir train_PDBs/ --save_name pro-train
 ```
+
+Paths for data, models, outputs, and other assets are centralized in `src/file_config.py` and can be adjusted there as needed.
 
 # Cite as
 

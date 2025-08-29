@@ -1,7 +1,18 @@
-from utils import *
-from conditional_flow_matching import ConditionalFlowMatcher
 import argparse
 import pickle as pkl
+from pathlib import Path
+import sys
+import os
+import numpy as np
+import torch
+import mdtraj as md
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / 'src'))
+
+from model_utils import *
+from conditional_flow_matching import ConditionalFlowMatcher
+from file_config import TRAIN_FEATURES_DIR, JOBS_DIR
 from torch.optim.lr_scheduler import StepLR
 import torch.nn.utils as nn_utils
 
@@ -88,15 +99,15 @@ else: msk_txt = ''
 #new_txt = f'{sym}-{sym_rep}{msk_txt}_cos-emb-{pos_cos}'
 new_txt = f'{sym}-{sym_rep}_seq-feats-{seq_feats}_seq-decay-{int(seq_decay)}_act-{act}_clip-{grad_clip}'
 
-job_dir = f'./jobs/{system}_{new_txt}_{loss_type}_m-{mdim}_dim-{dim}_nn-{num_nearest_neighbors}_depth-{depth}_eps-{n_epochs}_sigma-{sigma}_CG-noise-{Ca_std}_lr-{lr}'
+job_dir = JOBS_DIR / f'{system}_{new_txt}_{loss_type}_m-{mdim}_dim-{dim}_nn-{num_nearest_neighbors}_depth-{depth}_eps-{n_epochs}_sigma-{sigma}_CG-noise-{Ca_std}_lr-{lr}'
 os.makedirs(job_dir, exist_ok=True)
 
 # load different systems with max_atoms and encoding dim to ensure features will fit
 
 if system == 'pro':
     if load_path == 'default':
-        load_dict = pkl.load(open('./train_features/feats_pro_0-1000_all_max-8070.pkl', 'rb')) 
-        top_list = pkl.load(open('./train_features/tops_pro_0-1000_all.pkl', 'rb'))
+        load_dict = pkl.load(open(TRAIN_FEATURES_DIR / 'feats_pro_0-1000_all_max-8070.pkl', 'rb'))
+        top_list = pkl.load(open(TRAIN_FEATURES_DIR / 'tops_pro_0-1000_all.pkl', 'rb'))
     else:
         load_dict = pkl.load(open(load_path, 'rb')) 
         top_list= pkl.load(open(top_path, 'rb')) 
@@ -107,15 +118,15 @@ if system == 'pro':
     atom_dim = 37
     
     # load idxs of training and validation pdbs (features)
-    train_idxs = np.load(f'./train_features/idxs_train_pro.npy')[:max_train]
-    valid_idxs = np.load(f'./train_features/idxs_valid_pro.npy')[:max_val]
+    train_idxs = np.load(TRAIN_FEATURES_DIR / 'idxs_train_pro.npy')[:max_train]
+    valid_idxs = np.load(TRAIN_FEATURES_DIR / 'idxs_valid_pro.npy')[:max_val]
     
     #print('train_idx', train_idxs[:10], train_idxs[-10:])
     #print('valid_idxs', valid_idxs)
     
 elif system == 'DNApro':
     if load_path == 'default':
-        load_dict = pkl.load(open('./train_features/feats_DNAPro_DNA-range_10-120_pro-range_10-500.pkl', 'rb'))
+        load_dict = pkl.load(open(TRAIN_FEATURES_DIR / 'feats_DNAPro_DNA-range_10-120_pro-range_10-500.pkl', 'rb'))
     else:
         load_dict = pkl.load(open(load_path, 'rb')) 
         
@@ -124,8 +135,8 @@ elif system == 'DNApro':
     atom_dim = 68    # make sure to fit all pro + dna atom types
 
     # obtained from mmseqs on DNA and pro sequences
-    train_idxs = np.load(f'./train_features/idxs_train_DNAPro.npy')[:]
-    valid_idxs = np.load(f'./train_features/idxs_valid_DNAPro.npy')
+    train_idxs = np.load(TRAIN_FEATURES_DIR / 'idxs_train_DNAPro.npy')[:]
+    valid_idxs = np.load(TRAIN_FEATURES_DIR / 'idxs_valid_DNAPro.npy')
 
 # save hyperparams to pkl to reload model
 params_dict = { 'depth': depth,
@@ -143,7 +154,7 @@ params_dict = { 'depth': depth,
                 'grad_clip':grad_clip
                 }
 
-pkl.dump(params_dict, open(f'{job_dir}/params.pkl', 'wb'))
+pkl.dump(params_dict, open(job_dir / 'params.pkl', 'wb'))
     
 # reformat CG mask
 masks = []
@@ -353,13 +364,13 @@ for epoch in range(n_epochs):
                 try: cls_list += [clash_res_percent(trj_gen) for trj_gen in trj_gens]
                 except: print('Failed', [res for res in top.residues])
             
-            np.save(f'{job_dir}/ode-{epoch}_f-{idx}.npy', ode_traj)
-                
-        np.save(f'{job_dir}/bf-{epoch}.npy', bf_list)
-        np.save(f'{job_dir}/cls-{epoch}.npy', cls_list)
-        
+            np.save(job_dir / f'ode-{epoch}_f-{idx}.npy', ode_traj)
+
+        np.save(job_dir / f'bf-{epoch}.npy', bf_list)
+        np.save(job_dir / f'cls-{epoch}.npy', cls_list)
+
         # save ode outputs for visualization
-        torch.save(model.state_dict(), f'{job_dir}/state-{epoch}.pth')
+        torch.save(model.state_dict(), job_dir / f'state-{epoch}.pth')
         
   
    

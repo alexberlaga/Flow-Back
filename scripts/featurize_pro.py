@@ -2,10 +2,14 @@ import glob
 import mdtraj as md
 import pickle as pkl
 import argparse
-
+from pathlib import Path
 import sys
-sys.path.append('../')
-from utils import get_pro_ohes, get_aa_to_cg
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / 'src'))
+
+from model_utils import get_pro_ohes, get_aa_to_cg
+from file_config import TRAIN_FEATURES_DIR
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--pdb_dir', type=str, help='Load pdbs from this dir')
@@ -61,8 +65,9 @@ for pdb in pdb_list:
     if cnt%100==0 and cnt > 0:
         print(cnt)                    
               
+TRAIN_FEATURES_DIR.mkdir(parents=True, exist_ok=True)
 save_dict = {'res':res_list,'atom':atom_list,'xyz':xyz_list,'mask':mask_list,'map':aa_to_cg_list}
-pkl.dump(save_dict, open(f'../train_features/feats_{args.save_name}.pkl', 'wb'))
+pkl.dump(save_dict, open(TRAIN_FEATURES_DIR / f'feats_{args.save_name}.pkl', 'wb'))
 
 if args.collect_tops:
-    pkl.dump(top_list, open(f'../train_features/tops_{args.save_name}.pkl', 'wb'))
+    pkl.dump(top_list, open(TRAIN_FEATURES_DIR / f'tops_{args.save_name}.pkl', 'wb'))

@@ -1,5 +1,4 @@
 import subprocess
-import sys
 import tempfile
 import shutil
 import numpy as np
@@ -7,11 +6,12 @@ from openmm import *
 import os
 from openmm.app import *
 from openmm.unit import *
-import argparse 
+import argparse
 import glob
-import mdtraj as md 
+import mdtraj as md
 import MDAnalysis as mda
 from collections import defaultdict
+from file_config import FLOWBACK_DATA, FLOWBACK_OUTPUTS
 
 def _osremove(f):
     try:
@@ -101,7 +101,6 @@ def silence_atoms_and_shift_charge(nbforce, topology, mute, context=None):
     mute    = set(int(i) for i in mute)
     shifts  = defaultdict(lambda: 0.0*elementary_charge)   # charge → heavy atom
     nbforce.setUseDispersionCorrection(False)
-    # print(nbforce.getNonbondedMethod())
     # nbforce.setNonbondedMethod(NonbondedForce.CutoffPeriodic)
     # ------------------------------------------------------------------
     # 1. build a quick neighbour map from the Topology
@@ -123,7 +122,6 @@ def silence_atoms_and_shift_charge(nbforce, topology, mute, context=None):
             # first bonded neighbour that is NOT muted
             try:
                 parent = next(n for n in neighbours[idx] if n not in mute)
-                # print(topology.atom(parent), q)
                 shifts[parent] += q
             except StopIteration:
                 warnings.warn(f"Atom {idx} is muted but has no non-muted neighbours;"
@@ -150,7 +148,6 @@ def silence_atoms_and_shift_charge(nbforce, topology, mute, context=None):
         
         qi = nbforce.getParticleParameters(i)[0]
         qj = nbforce.getParticleParameters(j)[0]
-        # print(topology.atom(i), topology.atom(j), sigma, eps)
         if topology.atom(i).element.name == 'hydrogen' or topology.atom(j).element.name =='hydrogen':
             nbforce.setExceptionParameters(k, i, j, qi*qj, sigma, 0.0*kilojoule_per_mole)
         else:
@@ -236,7 +233,6 @@ def run_simulation(index, pdb_file, noh, save):
                             p1, p2, p3, p4, params = force_.getTorsionParameters(i)
                             if p1 in selected_atoms and p2 in selected_atoms and p3 in selected_atoms and p4 in selected_atoms:
                                 new_custom_torsion_force.addTorsion(p1, p2, p3, p4, params)
-                # print_memory_usage()
                 # Remove old forces and add the new ones
                 for fi in range(len(system.getForces()) - 1, -1, -1):
                     force_ = system.getForce(fi)
@@ -310,17 +306,17 @@ def main():
     model = args.model
     
     if args.nomodel:
-        pdb_files = glob.glob(f"data/{args.protein}_clean_AA/*.pdb")
-        stat_file = f'stat_files/{args.protein}_nomodel_stats.txt'
+        pdb_files = glob.glob(f"{FLOWBACK_DATA}/{args.protein}_clean_AA/*.pdb")
+        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_nomodel_stats.txt"
     elif args.nosuffix: 
-        pdb_files = glob.glob(f"outputs/{args.protein}/{model}/*.pdb")
-        stat_file = f'stat_files/{args.protein}_{model}_stats.txt'
+        pdb_files = glob.glob(f"{FLOWBACK_OUTPUTS}/{args.protein}/{model}/*.pdb")
+        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_{model}_stats.txt"
     elif args.num_files == 0:
-        pdb_files = glob.glob(f"outputs/{args.protein}/{model}_noise-0.003/*.pdb")
-        stat_file = f'stat_files/{args.protein}_{model}_stats.txt'
+        pdb_files = glob.glob(f"{FLOWBACK_OUTPUTS}/{args.protein}/{model}_noise-0.003/*.pdb")
+        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_{model}_stats.txt"
     else:
-        pdb_files = [f"outputs/{args.protein}/{model}_noise-0.003/frame_{i}_1.pdb" for i in range(args.num_files)]
-        stat_file = f'stat_files/{args.protein}_{model}_stats.txt'
+        pdb_files = [f"{FLOWBACK_OUTPUTS}/{args.protein}/{model}_noise-0.003/frame_{i}_1.pdb" for i in range(args.num_files)]
+        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_{model}_stats.txt"
 
     if args.noh:
         stat_file = f'{stat_file[:-4]}_noh.txt'

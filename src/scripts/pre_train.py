@@ -1,5 +1,6 @@
-from utils import *
-from conditional_flow_matching import ConditionalFlowMatcher
+from src.utils.model import *
+from src.conditional_flow_matching import ConditionalFlowMatcher
+from file_config import FLOWBACK_JOBDIR, FLOWBACK_INPUTS, FLOWBACK_BASE
 import argparse
 import pickle as pkl
 from torch.optim.lr_scheduler import StepLR
@@ -35,7 +36,7 @@ def setup_args(parser: ArgumentParser) -> ArgumentParser:
         ArgumentParser with added arguments
     """
     
-    parser.add_argument('--config', type=str, default='configs/config.yaml', help='Path to config file')
+    parser.add_argument('--config', type=str, default=f'{FLOWBACK_BASE}/configs/config.yaml', help='Path to config file')
 
     
     return parser
@@ -341,14 +342,9 @@ for epoch in range(cur_epoch + 1, n_epochs):
                 elif solver == 'euler_ff':
                     ode_traj = euler_ff_integrator(model_wrpd, torch.tensor(prior,
                                                                 dtype=torch.float32).to(device), torch.tensor(ca_test_pos).to(device), rtp_data, lj_data, bond_data, top, device)
-            print_memory_usage()           
             # assume we're working with one structure at a time
             xyz_gens = ode_traj[-1] + ca_test_pos[0]
             xyz_ref = xyz_true[idx]
-            
-            
-            
-            print(xyz_gens.shape, xyz_ref.shape, top.n_atoms)
             
             # need n_atoms to account for pro-dna case
             trj_gens = md.Trajectory(xyz_gens[:, :top.n_atoms], top)
@@ -356,8 +352,10 @@ for epoch in range(cur_epoch + 1, n_epochs):
             bf_list += [bond_fraction(trj_ref, trj_gen) for trj_gen in trj_gens]
             
             
-            try: cls_list += [clash_res_percent(trj_gen) for trj_gen in trj_gens]
-            except: print('Failed', [res for res in top.residues])
+            try:
+                cls_list += [clash_res_percent(trj_gen) for trj_gen in trj_gens]
+            except:
+                print('Failed', [res for res in top.residues])
             
             np.save(f'{job_dir}/ode-{epoch}_f-{idx}.npy', ode_traj)
                 

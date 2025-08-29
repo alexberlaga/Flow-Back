@@ -1,8 +1,7 @@
 ### input directory to pdbs/trajs and return N generated samples of each ###
 
-import sys, os
-sys.path.append('../')
-sys.path.append('./utils/')
+import os
+from file_config import FLOWBACK_OUTPUTS, FLOWBACK_DATA, FLOWBACK_MODELS
 
 import argparse
 import glob
@@ -12,10 +11,10 @@ import time
 import datetime
 
 # need to test these for preproccessing
-from eval_utils import * 
+from src.utils.evaluation import *
 
 # import functions to check and correct chirality
-from chi_utils import *
+from src.utils.chi import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--load_dir', default='PDB', type=str, help='Path to input pdbs -- Can be AA or CG')
@@ -29,7 +28,7 @@ parser.add_argument('--check_bonds', action='store_true',  help='Calculate bond 
 parser.add_argument('--check_div', action='store_true',  help='Calculate diversity score (for multi-gen)')
 parser.add_argument('--mask_prior', action='store_true',  help='Enforce CG positions remain the same')
 parser.add_argument('--retain_AA', action='store_true',  help='Hold AA positions for scoring')
-parser.add_argument('--model_path', default='../models/Pro_pretrained', type=str, help='Trained model')
+parser.add_argument('--model_path', default=f'{FLOWBACK_MODELS}/Pro_pretrained', type=str, help='Trained model')
 parser.add_argument('--tolerance', default=3e-5, type=float, help='Tolerance if using NN solver')
 parser.add_argument('--nsteps', default=100, type=int, help='Number of steps in Euler integrator')
 parser.add_argument('--system', default='pro', type=str, help='Pro or DNAPro CG input')
@@ -63,8 +62,8 @@ vram = args.vram
 save_traj = args.save_traj
 save_dcd = args.save_dcd
 
-save_dir = f'../outputs/{load_dir}'
-load_dir = f'../data/{load_dir}'
+save_dir = f'{FLOWBACK_OUTPUTS}/{load_dir}'
+load_dir = f'{FLOWBACK_DATA}/{load_dir}'
 
 # remove mask and nsteps to simplify naming
 if solver == 'euler':
@@ -79,7 +78,7 @@ if mask_prior:
 os.makedirs(save_prefix, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(device)
+print(f'Using device: {device}')
 
 # add optional preprocessing to save files -- skip if already cleaned
 if system == 'pro':
@@ -193,15 +192,12 @@ for trj_name in tqdm(trj_list, desc='Iterating over trajs'):
         else:
             xyz_gen.append(ode_traj[-1]) 
 
-    print(np.shape(xyz_gen))
     xyz_gen = np.concatenate(xyz_gen)
-    print(xyz_gen.shape)
           
     # don't include DNA virtual atoms in top 
     aa_idxs = top.select(f"not name DS and not name DP and not name DB")
     trj_gens = md.Trajectory(xyz_gen[:, :top.n_atoms], top).atom_slice(aa_idxs)
     trj_refs = md.Trajectory(xyz_ref[:, :top.n_atoms], top).atom_slice(aa_idxs)
-    print(trj_gens.xyz.shape)
 
     # Can only calculate bonds and div if an AA reference is provided
     if check_bonds:
@@ -263,4 +259,3 @@ except:
 
 print(f'\nSaved to:  {save_prefix}\n')
 
-#

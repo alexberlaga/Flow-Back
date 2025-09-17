@@ -94,7 +94,7 @@ def process_pro_aa(load_dir, stride=1):
         xyz = aa_trj.xyz[:, np.array(idx_list)]
 
         # Save txt as temporary pdb and load new molecules
-        with tempfile.NamedTemporaryFile(mode='w+', suffix='.pdb', delete=True, prefix='flowback-') as tmp:
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.pdb', delete=True, prefix='') as tmp:
             tmp.write(aa_pdb)
             tmp.flush()  # Ensure content is written to disk before reading
             trj_aa_fix = md.load(tmp.name)
@@ -190,7 +190,7 @@ def process_pro_cg(load_dir, stride=1):
         xyz[:, np.array(ca_idxs)] = cg_xyz
 
         # save txt as temporary pdb and load new molecules
-        with tempfile.NamedTemporaryFile(mode='w+', suffix='.pdb', delete=True, prefix='flowback-') as tmp:
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.pdb', delete=True, prefix='') as tmp:
             tmp.write(aa_pdb)
             tmp.flush()  # Ensure content is written to disk before reading
             trj_aa_fix = md.load(tmp.name)

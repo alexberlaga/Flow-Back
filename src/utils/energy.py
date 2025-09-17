@@ -92,7 +92,7 @@ def minim_explicit_structure_to_energy(topology: md.Topology, xyz: np.ndarray, f
     ff_dir = ensure_charmm_ff(ff_version)
     heavy_mask = np.array([atom.element.symbol != "H" for atom in topology.atoms], dtype=bool)
 
-    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
+    with tempfile.TemporaryDirectory(prefix='') as temp_dir:
         pdb_file = f'{temp_dir}/temp.pdb'
         structure_file = f"{temp_dir}/structure.gro"
         topology_file = f"{temp_dir}/topol.top"
@@ -177,7 +177,7 @@ def charmm_structure_to_energy(topology: md.Topology, xyz: np.ndarray, nonbonded
     ff_dir = ensure_charmm_ff(ff_version)
     if np.max(compute_all_distances(t)) > 4 * t.top.n_residues ** 0.5:
         raise RuntimeError("Crazy Structure. Could Not Compute Energy")
-    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
+    with tempfile.TemporaryDirectory(prefix='') as temp_dir:
         pdb_file = f'{temp_dir}/temp.pdb'
         structure_file = f"{temp_dir}/structure.gro"
         topology_file = f"{temp_dir}/topol.top"
@@ -316,7 +316,7 @@ def rdkit_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
     """
     blocker = rdBase.BlockLogs()
     t = md.Trajectory(xyz, topology)
-    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
+    with tempfile.TemporaryDirectory(prefix='') as temp_dir:
         t.save_pdb(f'{temp_dir}/temp.pdb')
         mol = Chem.MolFromPDBFile(f'{temp_dir}/temp.pdb')
     if mol.GetNumConformers() == 0:
@@ -358,7 +358,7 @@ def amber_solv_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
     t = md.Trajectory(xyz, topology)
 
 
-    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
+    with tempfile.TemporaryDirectory(prefix='') as temp_dir:
         pdb_file = f'{temp_dir}/temp.pdb'
         t.save_pdb(pdb_file)
     # --- AMBER14 with implicit solvent (GBn2) ---
@@ -451,7 +451,7 @@ def minim_implicit_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
     t = md.Trajectory(xyz, topology)
     heavy_mask = np.array([atom.element.symbol != "H" for atom in topology.atoms], dtype=bool)
 
-    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
+    with tempfile.TemporaryDirectory(prefix='') as temp_dir:
         pdb_file = f'{temp_dir}/temp.pdb'
         t.save_pdb(pdb_file)
 

@@ -60,13 +60,124 @@ def charmm_traj_to_energy(topology: md.Topology, xyz: np.ndarray, ff_version: st
     #Divide by ten to convert from angstroms to nm
     return energies, gradients * angstrom / nanometer
 
+
+def minim_explicit_traj_to_energy(topology: md.Topology, xyz: np.ndarray, ff_version: str = "auto"):
+    gradients = np.zeros_like(xyz)
+    energies = np.zeros(xyz.shape[0])
+    for i in range(xyz.shape[0]):
+        energy, gradient = minim_explicit_structure_to_energy(topology, xyz[i:i+1], ff_version=ff_version)
+        energies[i] = energy
+        gradients[i] = gradient
+    return energies, gradients
+
+
+def _run_gmx_command(command, env, stdin=None, step_name="GMX"):
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if stdin is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=1024 * 1024 * 8,
+        text=True,
+        env=env,
+    )
+    stdout, stderr = process.communicate(stdin)
+    if process.returncode != 0:
+        raise RuntimeError(f"Energy calculation failed at {step_name} step. Error:\n{stderr}")
+    return stdout, stderr
+
+
+def minim_explicit_structure_to_energy(topology: md.Topology, xyz: np.ndarray, ff_version: str = "auto"):
+    t = md.Trajectory(xyz, topology)
+    ff_dir = ensure_charmm_ff(ff_version)
+    heavy_mask = np.array([atom.element.symbol != "H" for atom in topology.atoms], dtype=bool)
+
+    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
+        pdb_file = f'{temp_dir}/temp.pdb'
+        structure_file = f"{temp_dir}/structure.gro"
+        topology_file = f"{temp_dir}/topol.top"
+        boxed_file = f"{temp_dir}/structure_box.gro"
+        solvated_file = f"{temp_dir}/structure_solv.gro"
+
+        t.save_pdb(pdb_file)
+
+        commands = [
+            "gmx_mpi", "pdb2gmx", "-f", pdb_file, "-o", structure_file, "-p", topology_file,
+            "-ff", ff_dir.stem, "-water", "spce", "-ter", "-nobackup", "-quiet", "-i", f'{temp_dir}/posre.itp'
+        ]
+        env = os.environ.copy()
+        env["GMXLIB"] = str(ff_dir.parent)
+        _run_gmx_command(commands, env, stdin='0\n0\n', step_name="pdb2gmx")
+
+        editconf_cmd = [
+            "gmx_mpi", "editconf", "-f", structure_file, "-o", boxed_file, "-bt", "cubic", "-d", "1.0", "-quiet"
+        ]
+        _run_gmx_command(editconf_cmd, env, step_name="editconf")
+
+        solvate_cmd = [
+            "gmx_mpi", "solvate", "-cp", boxed_file, "-cs", "spc216.gro", "-o", solvated_file, "-p", topology_file, "-quiet"
+        ]
+        _run_gmx_command(solvate_cmd, env, step_name="solvate")
+
+        index_map = map_original_to_processed_indices(pdb_file, solvated_file)
+        gro = GromacsGroFile(solvated_file)
+        gromacs_top = GromacsTopFile(
+            topology_file,
+            periodicBoxVectors=gro.getPeriodicBoxVectors(),
+            includeDir=str(ff_dir)
+        )
+
+        system = gromacs_top.createSystem(
+            nonbondedMethod=PME,
+            nonbondedCutoff=1.0 * nanometer,
+            constraints=HBonds
+        )
+
+        integrator = LangevinMiddleIntegrator(300 * kelvin, 1 / picosecond, 0.002 * picoseconds)
+
+        platform = None
+        platform_props = {}
+        for name, props in [
+            ("CUDA", {"DeviceIndex": "0", "Precision": "mixed", "DeterministicForces": "true"}),
+            ("OpenCL", {"DeviceIndex": "0", "Precision": "single"}),
+            ("CPU", {}),
+        ]:
+            try:
+                platform = Platform.getPlatformByName(name)
+                platform_props = props
+                break
+            except Exception:
+                continue
+        if platform is None:
+            platform = Platform.getPlatformByName("CPU")
+            platform_props = {}
+        sim = Simulation(gromacs_top.topology, system, integrator, platform, platform_props)
+        sim.context.setPositions(gro.positions)
+
+        pre_state = sim.context.getState(getPositions=True)
+        pre_positions = pre_state.getPositions(asNumpy=True).value_in_unit(nanometer)
+
+        LocalEnergyMinimizer.minimize(sim.context)
+
+        state = sim.context.getState(getEnergy=True, getPositions=True)
+        post_positions = state.getPositions(asNumpy=True).value_in_unit(nanometer)
+        energy = state.getPotentialEnergy()
+
+        index_map = np.asarray(index_map, dtype=int)
+        gradients = np.zeros((xyz.shape[1], 3), dtype=xyz.dtype)
+        valid = (index_map >= 0) & heavy_mask
+        displacement = post_positions[index_map[valid]] - pre_positions[index_map[valid]]
+        gradients[valid] = displacement.astype(gradients.dtype)
+
+    return energy.value_in_unit(kilojoules_per_mole), gradients
+
 # @time_elapsed
 def charmm_structure_to_energy(topology: md.Topology, xyz: np.ndarray, nonbonded=True, ff_version: str = "auto"):
     t = md.Trajectory(xyz, topology)
     ff_dir = ensure_charmm_ff(ff_version)
     if np.max(compute_all_distances(t)) > 4 * t.top.n_residues ** 0.5:
         raise RuntimeError("Crazy Structure. Could Not Compute Energy")
-    with tempfile.TemporaryDirectory(dir='/project2/andrewferguson/berlaga') as temp_dir:
+    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
         pdb_file = f'{temp_dir}/temp.pdb'
         structure_file = f"{temp_dir}/structure.gro"
         topology_file = f"{temp_dir}/topol.top"
@@ -205,7 +316,7 @@ def rdkit_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
     """
     blocker = rdBase.BlockLogs()
     t = md.Trajectory(xyz, topology)
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
         t.save_pdb(f'{temp_dir}/temp.pdb')
         mol = Chem.MolFromPDBFile(f'{temp_dir}/temp.pdb')
     if mol.GetNumConformers() == 0:
@@ -232,11 +343,22 @@ def amber_solv_traj_to_energy(topology: md.Topology, xyz: np.ndarray):
         gradients[i] = gradient
     return energies, gradients * angstrom / nanometer
 
+
+def minim_implicit_traj_to_energy(topology: md.Topology, xyz: np.ndarray):
+    gradients = np.zeros_like(xyz)
+    energies = np.zeros(xyz.shape[0])
+    for i in range(xyz.shape[0]):
+        energy, gradient = minim_implicit_structure_to_energy(topology, xyz[i:i+1])
+        energies[i] = energy
+        gradients[i] = gradient
+    return energies, gradients
+
+
 def amber_solv_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
     t = md.Trajectory(xyz, topology)
-    
 
-    with tempfile.TemporaryDirectory() as temp_dir:
+
+    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
         pdb_file = f'{temp_dir}/temp.pdb'
         t.save_pdb(pdb_file)
     # --- AMBER14 with implicit solvent (GBn2) ---
@@ -323,3 +445,91 @@ def amber_solv_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
     energy = state.getPotentialEnergy()
 
     return energy.value_in_unit(kilojoules_per_mole), -1 * heavy_forces
+
+
+def minim_implicit_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
+    t = md.Trajectory(xyz, topology)
+    heavy_mask = np.array([atom.element.symbol != "H" for atom in topology.atoms], dtype=bool)
+
+    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
+        pdb_file = f'{temp_dir}/temp.pdb'
+        t.save_pdb(pdb_file)
+
+        fixer = PDBFixer(filename=pdb_file)
+        original_keys = [atom_key(atom) for atom in fixer.topology.atoms()]
+        fixer.findMissingResidues()
+        fixer.findNonstandardResidues()
+        fixer.replaceNonstandardResidues()
+
+        fixer.findMissingAtoms()
+        ctr0, _ = counter_from_topology(fixer.topology)
+
+        fixer.addMissingAtoms()
+
+        ctr1, idx_after_atoms = counter_from_topology(fixer.topology)
+        _, added_heavy_idxs = diff_added_atoms(ctr0, ctr1, idx_after_atoms)
+
+        ff = ForceField("amber14-all.xml", "implicit/gbn2.xml")
+        fixer.addMissingHydrogens(pH=7.0, forcefield=ff)
+        topology_post = fixer.topology
+
+        ctr2, idx_after_H = counter_from_topology(fixer.topology)
+        _, added_h_idxs = diff_added_atoms(ctr1, ctr2, idx_after_H)
+
+        added_idx_set = set(added_heavy_idxs) | set(added_h_idxs)
+        lookup_after = {k: list(v) for k, v in idx_after_H.items()}
+        mapped_indices = []
+        for key in original_keys:
+            indices = lookup_after.get(key, [])
+            mapped_idx = -1
+            while indices:
+                candidate = indices.pop(0)
+                if candidate not in added_idx_set:
+                    mapped_idx = candidate
+                    break
+            mapped_indices.append(mapped_idx)
+        mapped_indices = np.asarray(mapped_indices, dtype=int)
+
+        system = ff.createSystem(
+            topology_post,
+            nonbondedMethod=NoCutoff,
+            constraints=HBonds
+        )
+
+        integrator = LangevinMiddleIntegrator(300 * kelvin, 1 / picosecond, 0.002 * picoseconds)
+
+        platform = None
+        platform_props = {}
+        for name, props in [
+            ("CUDA", {"DeviceIndex": "0", "Precision": "mixed", "DeterministicForces": "true"}),
+            ("OpenCL", {"DeviceIndex": "0", "Precision": "single"}),
+            ("CPU", {}),
+        ]:
+            try:
+                platform = Platform.getPlatformByName(name)
+                platform_props = props
+                break
+            except Exception:
+                continue
+        if platform is None:
+            platform = Platform.getPlatformByName("CPU")
+            platform_props = {}
+
+        sim = Simulation(topology_post, system, integrator, platform, platform_props)
+        sim.context.setPositions(fixer.positions)
+
+        pre_state = sim.context.getState(getPositions=True)
+        pre_positions = pre_state.getPositions(asNumpy=True).value_in_unit(nanometer)
+
+        LocalEnergyMinimizer.minimize(sim.context)
+
+        state = sim.context.getState(getEnergy=True, getPositions=True)
+        post_positions = state.getPositions(asNumpy=True).value_in_unit(nanometer)
+        energy = state.getPotentialEnergy()
+
+        gradients = np.zeros((xyz.shape[1], 3), dtype=xyz.dtype)
+        valid = (mapped_indices >= 0) & heavy_mask
+        displacement = post_positions[mapped_indices[valid]] - pre_positions[mapped_indices[valid]]
+        gradients[valid] = displacement.astype(gradients.dtype)
+
+    return energy.value_in_unit(kilojoules_per_mole), gradients

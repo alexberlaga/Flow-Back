@@ -157,7 +157,7 @@ def run_simulation(index, pdb_file, noh, save):
     print(f"Starting simulation {index} with {pdb_file}...")
 
     # Use a temporary directory to avoid unwanted backup files
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(prefix='flowback-') as temp_dir:
         if save:
             temp_dir = 'saved_trajs'
         structure_file = f"{temp_dir}/structure_{index}.gro"

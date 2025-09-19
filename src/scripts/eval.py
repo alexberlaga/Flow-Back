@@ -10,7 +10,7 @@ import yaml
 import argparse
 from argparse import ArgumentParser
 
-from src.file_config import FLOWBACK_OUTPUTS, FLOWBACK_DATA, FLOWBACK_MODELS, FLOWBACK_BASE
+from src.file_config import FLOWBACK_OUTPUTS, FLOWBACK_DATA, FLOWBACK_MODELS, FLOWBACK_BASE, fb_temp_dir
 
 # need to test these for preproccessing
 from src.utils.evaluation import *
@@ -70,6 +70,7 @@ save_dcd = config_args.save_dcd
 overwrite = config_args.overwrite
 save_dir_cfg = config_args.save_dir
 external = config_args.external
+os.environ['FLOWBACK_TEMP_DIR_LOC'] = getattr(config_args, "temp_dir_loc", "~")
 
 if save_dir_cfg == '':
     save_dir = f'{FLOWBACK_OUTPUTS}/{load_dir}'
@@ -111,7 +112,7 @@ else:
     print('Invalid system type')
 
 # load model
-model = load_model(model_path, ckp, device) #, sym, pos_cos, seq_feats, seq_decay)
+model = load_model(model_path, ckp, device) 
 
 # Track scores
 bf_list, clash_list, div_list = [], [], []
@@ -184,15 +185,7 @@ for trj_name in tqdm(trj_list, desc='Iterating over trajs'):
                     ode_traj = euler_ff_integrator(model_wrpd, torch.tensor(prior,
                                                                     dtype=torch.float32).to(device), torch.tensor(ca_pos_test).to(device), rtp_data, lj_data, bond_data, top, device, t_flip=t_flip) #, t_flip=t_flip, type_flip=type_flip
            
-            # elif solver == 'euler_chi':
-            #     with torch.no_grad():
-            #         ode_traj, chi_list = euler_integrator_chi_check(model_wrpd, 
-            #                               torch.tensor(xyz_test_prior, dtype=torch.float32).to(device), 
-            #                               nsteps=nsteps, 
-            #                               t_flip=t_flip,
-            #                               top_ref=top,
-            #                               type_flip=type_flip)
-              
+
             # end time and save
             time_diff = datetime.datetime.now() - start_time
             time_list.append(time_diff.total_seconds())
@@ -255,18 +248,18 @@ for trj_name in tqdm(trj_list, desc='Iterating over trajs'):
 
 # save all scores to same dir
 if check_bonds:
-    np.save(f'{save_prefix}bf.npy', np.array(bf_list))
+    np.save(f'{save_prefix}/bf.npy', np.array(bf_list))
 if check_clash:
-    np.save(f'{save_prefix}cls.npy', np.array(clash_list))
+    np.save(f'{save_prefix}/cls.npy', np.array(clash_list))
 if check_div:
-    np.save(f'{save_prefix}div.npy', np.array(div_list))
+    np.save(f'{save_prefix}/div.npy', np.array(div_list))
           
 # save ordered list of trajs
-with open(f'{save_prefix}trj_list.pkl', "wb") as output_file:
+with open(f'{save_prefix}/trj_list.pkl', "wb") as output_file:
     pkl.dump(trj_list, output_file)
      
 try:
-    np.save(f'{save_prefix}time_gen-{n_gens}.npy', np.array([res_list, time_list]))     
+    np.save(f'{save_prefix}/time_gen-{n_gens}.npy', np.array([res_list, time_list]))     
 except:
     pass
 

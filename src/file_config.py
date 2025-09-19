@@ -11,3 +11,6 @@ FLOWBACK_OUTPUTS = f"{FLOWBACK_BASE}/outputs"
 FLOWBACK_DATA = f"{FLOWBACK_BASE}/data"
 FLOWBACK_FF = f"{FLOWBACK_BASE}/forcefield"
 FLOWBACK_INPUTS = f"{FLOWBACK_BASE}/inputs"
+
+def fb_temp_dir():
+    return os.environ.get("FLOWBACK_TEMP_DIR_LOC", os.path.expanduser("~") + '/')

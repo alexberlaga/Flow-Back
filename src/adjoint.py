@@ -32,8 +32,6 @@ def stochastic_trajectory(v_finetune, sigma_t, **kwargs):
         'RDKit': rdkit_traj_to_energy,
         'CHARMM': lambda topology, xyz: charmm_traj_to_energy(topology, xyz, ff_version=charmm_ff),
         'amber-solv': amber_solv_traj_to_energy,
-        'minim-explicit': lambda topology, xyz: minim_explicit_traj_to_energy(topology, xyz, ff_version=charmm_ff),
-        'minim-implicit': minim_implicit_traj_to_energy
     }
     energy_func = energy_funcs[kwargs.get('ff')]
     

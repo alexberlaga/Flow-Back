@@ -11,7 +11,7 @@
 ### Env setup
 Clone the repo and run the setup script to create and activate a local virtual environment using `pip`:
 
-    git clone https://github.com/mrjoness/Flow-Back.git
+    git clone https://github.com/alexberlaga/Flow-Back.git
     cd Flow-Back
     source setup.sh
 

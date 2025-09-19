@@ -124,7 +124,7 @@ class PostTrainModule(pl.LightningModule):
         selection_split: float,
         compare: bool = False,
         test: bool = False,
-        agb: int = 16
+        agb: int = 16,
     ) -> None:
         super().__init__()
         self.model = deepcopy(base_model)
@@ -196,7 +196,7 @@ class PostTrainModule(pl.LightningModule):
             "int_ff": self.int_ff,
             "max_grad": self.max_grad,
             "t_flip": self.t_flip,
-            "compare": self.compare
+            "compare": self.compare,
         }
 
         if self.compare:
@@ -354,6 +354,7 @@ if __name__ == "__main__":
     MAX_GRAD = getattr(config_args, "max_grad", 5e3)
     t_flip = getattr(config_args, "t_flip", 0.55)
     charmm_ff = getattr(config_args, "charmm_ff", "auto")
+    os.environ['FLOWBACK_TEMP_DIR_LOC'] = getattr(config_args, "temp_dir_loc", "~")
 
     job_dir = f"{FLOWBACK_JOBDIR}/{save_dir}_post"
     os.makedirs(job_dir, exist_ok=True)
@@ -427,7 +428,7 @@ if __name__ == "__main__":
         selection_split=selection_split,
         compare=args.compare,
         test=args.test,
-        agb=acc_grad_batch
+        agb=acc_grad_batch,
     )
     if restart:
         module.model.load_state_dict(

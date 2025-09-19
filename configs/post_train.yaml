@@ -36,3 +36,4 @@ charmm_ff: 'auto'      # CHARMM force field version ('auto', 'charmm27', 'charmm
 restart: False        # Resume training from save_dir
 int_ff: True          # Use internal FF parameters
 t_flip: 0.25          # Fraction of steps to attempt chirality flips
+temp_dir_loc: '/project2/andrewferguson/berlaga' # location of temporary files

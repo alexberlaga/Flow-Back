@@ -82,6 +82,78 @@ python -m src.scripts.run_energies --data PDB_example --model post_train --check
 The script searches `outputs/PDB_example` for a directory matching
 `post_train_ckp-7000_noise-0.003/`, processes all contained .pdb files, and saves the resulting energy array to `outputs/energies/energies_PDB_example_post_train_ckp-7000_noise-0.003.npy`.
 
+---
+
+## Repository layout (updated)
+
+This repository now includes training, evaluation, post-processing, force-field data, checkpoints, and tests.
+
+### Top-level files
+
+- `README.md`: project overview and usage.
+- `pyproject.toml`: project/package and tool configuration.
+- `environment.yml`: Conda environment definition.
+- `setup.sh`: convenience script to create and activate a local virtual environment.
+- `pytest.ini`: pytest defaults.
+
+### `src/` (core package)
+
+- `src/conditional_flow_matching.py`: main flow-matching model logic.
+- `src/adjoint.py`: adjoint/energy-guided training objective and utilities.
+- `src/chirality_predictor.py`: chirality classifier used for structure checks.
+- `src/file_config.py`: central path/config helpers used by scripts.
+- `src/utils/`: shared utility code for models, energy terms, evaluation, and chi/chirality:
+  - `model.py`, `evaluation.py`, `chi.py`
+  - `energy.py`, `energy_helpers.py`, `run_energy.py`
+- `src/egnn_pytorch_se3/`: EGNN building blocks and geometric utilities.
+
+### `src/scripts/` (CLI entry points)
+
+All scripts can be run as `python -m src.scripts.<name> ...`.
+
+- `pre_train.py`: base FlowBack training.
+- `post_train.py`: FlowBack-Adjoint post-training.
+- `eval.py`: inference/backmapping and metric generation.
+- `train.py`: generic training entry point/helper.
+- `run_energies.py`: batch CHARMM energy evaluation on generated PDBs.
+- `get_val_energies.py`: validation-energy extraction helper.
+- `featurize_pro.py`: protein featurization/preprocessing.
+- `md_test.py`: molecular-dynamics style sanity/integration test helper.
+
+### `configs/`
+
+- `pre_train.yaml`: pre-training config.
+- `post_train.yaml`: post-training config (standard).
+- `post_train_no_solv.yaml`: post-training config variant without solvent terms.
+- `eval.yaml`: inference/evaluation config (standard).
+- `eval_no_solv.yaml`: inference/evaluation config variant without solvent terms.
+
+### `tests/`
+
+- `test_end_to_end.py`: end-to-end workflow checks.
+- `test_scripts_cli.py`: CLI-level tests.
+- `test_model_utils.py`: model utility tests.
+- `test_energy.py`: energy-function tests.
+- `test_chi.py`: chi/chirality tests.
+- `conftest.py`: shared fixtures.
+
+### Data and assets
+
+- `data/`
+  - `PDB_example/`: example coarse-grained protein inputs.
+  - `pro_traj_example/`: short protein trajectory example.
+  - `DNApro_example/`: DNA-protein complex examples.
+  - `DNApro_traj_example/`: DNA-protein trajectory example.
+- `forcefield/`
+  - `aminoacids.rtp`, `bondtypes.csv`, `ffnonbonded.csv`: force-field lookup tables/files used in physics-aware routines.
+- `models/`
+  - `pre_train/`: example pre-trained checkpoint + params/config.
+  - `post_train/`: example post-trained checkpoint + config.
+  - `old/`: legacy checkpoints retained for compatibility/reference.
+- `chirality_checkpoints/`
+  - `ckpt_epoch_0075.pt`: trained chirality predictor checkpoint.
+- `notebooks/run_energies.ipynb`: notebook workflow for energy analysis.
+
 ## Cite as
 
     @article{jones2025flowback,
@@ -101,4 +173,3 @@ The script searches `outputs/PDB_example` for a directory matching
       primaryClass={physics.chem-ph},
       url={https://arxiv.org/abs/2508.03619}
     }
-

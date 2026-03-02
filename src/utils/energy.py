@@ -12,6 +12,11 @@ import tempfile
 import subprocess
 from .energy_helpers import *
 import warnings
+from src.file_config import fb_temp_dir
+from collections import defaultdict
+from mdtraj.reporters import XTCReporter
+from pdbfixer import PDBFixer
+from tqdm import tqdm
 
 warnings.filterwarnings('ignore')
 
@@ -24,6 +29,7 @@ class EnergyModel(torch.nn.Module):
 
 
     def forward(self, x, **kwargs):
+        
         return EnergyFunction.apply(x, self.energy_func, self.topology_pdb).requires_grad_(True)
         
 class EnergyFunction(torch.autograd.Function):
@@ -50,6 +56,8 @@ class EnergyFunction(torch.autograd.Function):
       
         return result, None, None, None  # Gradient w.r.t. input, ignore func
 
+
+
 def charmm_traj_to_energy(topology: md.Topology, xyz: np.ndarray, ff_version: str = "auto"):
     gradients = np.zeros_like(xyz)
     energies = np.zeros(xyz.shape[0])
@@ -60,128 +68,362 @@ def charmm_traj_to_energy(topology: md.Topology, xyz: np.ndarray, ff_version: st
     #Divide by ten to convert from angstroms to nm
     return energies, gradients * angstrom / nanometer
 
-# @time_elapsed
+
+
 def charmm_structure_to_energy(topology: md.Topology, xyz: np.ndarray, nonbonded=True, ff_version: str = "auto"):
     t = md.Trajectory(xyz, topology)
-    ff_dir = ensure_charmm_ff(ff_version)
+    # ff_dir = ensure_charmm_ff(ff_version)
     if np.max(compute_all_distances(t)) > 4 * t.top.n_residues ** 0.5:
         raise RuntimeError("Crazy Structure. Could Not Compute Energy")
     with tempfile.TemporaryDirectory() as temp_dir:
         pdb_file = f'{temp_dir}/temp.pdb'
-        structure_file = f"{temp_dir}/structure.gro"
-        topology_file = f"{temp_dir}/topol.top"
-        
         t.save_pdb(pdb_file)
-        commands = [
-           "gmx_mpi", "pdb2gmx", "-f", pdb_file, "-o", structure_file, "-p", topology_file,
-            "-ff", ff_dir.stem, "-water", "spce", "-ter", "-nobackup", "-quiet", "-i", f'{temp_dir}/posre.itp'
-        ]
-        env = os.environ.copy()
-        env["GMXLIB"] = str(ff_dir.parent)
-        process = subprocess.Popen(
-            commands,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=1024 * 1024 * 8,
-            text=True,
-            env=env,
+    # --- AMBER14 with implicit solvent (GBn2) ---
+        fixer = PDBFixer(filename=pdb_file)
+        fixer.findMissingResidues()
+        fixer.findNonstandardResidues()
+        fixer.replaceNonstandardResidues()
+        
+    
+        fixer.findMissingAtoms()
+        ctr0, _ = counter_from_topology(fixer.topology)
+        
+        fixer.addMissingAtoms()
+        ff = ForceField("charmm36.xml")
+       
+        fixer.addMissingHydrogens(pH=7.0, forcefield=ff)
+        ctr1, idx_after_atoms = counter_from_topology(fixer.topology)
+        added, added_idxs = diff_added_atoms(ctr0, ctr1, idx_after_atoms)
+        # Define the output PDB filename
+        positions = fixer.positions
+        # 1. Get positions and calculate the required box size
+        pos_np = np.array(fixer.positions.value_in_unit(nanometer))
+        min_coords = pos_np.min(axis=0)
+        max_coords = pos_np.max(axis=0)
+        molecule_size = max_coords - min_coords
+        padding = 2.0  # nm
+        box_dim = molecule_size + padding
+        
+        # 2. MANDATORY: Set the box vectors on the Topology object
+        # Without this, ff.createSystem(nonbondedMethod=PME) will fail.
+        box_vectors = (
+            Vec3(box_dim[0], 0, 0) * nanometer,
+            Vec3(0, box_dim[1], 0) * nanometer,
+            Vec3(0, 0, box_dim[2]) * nanometer
         )
+        fixer.topology.setPeriodicBoxVectors(box_vectors)
         
-        
-        stdout, stderr = process.communicate('0\n0\n')
-        if process.returncode != 0:
-            print(f"Energy calculation failed at pdb2gmx step. Error:\n{stderr}")
-            return np.zeros_like(xyz)
-        index_map = map_original_to_processed_indices(pdb_file, structure_file)
-        gro = GromacsGroFile(structure_file)
-        original_box = gro.getPeriodicBoxVectors()
-        expanded_box = (
-            original_box[0] + Vec3(2, 0, 0) * nanometer,
-            original_box[1] + Vec3(0, 2, 0) * nanometer,
-            original_box[2] + Vec3(0, 0, 2) * nanometer,
+        # 3. Create the System (Now PME will work because the topology has a box)
+        system = ff.createSystem(
+            fixer.topology,
+            nonbondedMethod=PME,
+            nonbondedCutoff=1.0 * nanometer,
+            constraints=HBonds
         )
-        topology = GromacsTopFile(
-            topology_file,
-            periodicBoxVectors=expanded_box,
-            includeDir=str(ff_dir)
-            # includeDir=[temp_dir, ff_dir.parent],
-        )
-        # Create simulation system
+        added = np.asarray(added_idxs, dtype=int)
+        n_atoms = system.getNumParticles()
+        keep = np.ones(n_atoms, dtype=bool)
+        keep[added] = False
         
-        system = topology.createSystem(nonbondedMethod=PME, nonbondedCutoff=1.0*nanometer,
-                                       constraints=HBonds)
-        t2 = md.load(structure_file)
-        
-        selected_atoms = index_map
-        new_bond_force = HarmonicBondForce()
-        new_bond_force.setForceGroup(10)
-        new_angle_force = HarmonicAngleForce()
-        new_angle_force.setForceGroup(11)
-        new_torsion_force = PeriodicTorsionForce()
-        new_torsion_force.setForceGroup(12)
-        new_custom_torsion_force = CustomTorsionForce("0.5*k*(thetap-theta0)^2; thetap = step(-(theta-theta0+pi))*2*pi+theta+step(theta-theta0-pi)*(-2*pi); pi = 3.14159265358979")
-        new_custom_torsion_force.addPerTorsionParameter('theta0')
-        new_custom_torsion_force.addPerTorsionParameter('k')
-        new_custom_torsion_force.setForceGroup(13)
-        
-        for force in enumerate(system.getForces()):
-            force_ = force[1]
-            if isinstance(force_, HarmonicBondForce):
-                for i in range(force_.getNumBonds()):
-                    p1, p2, length, k = force_.getBondParameters(i)
-                    if p1 in selected_atoms and p2 in selected_atoms:
-                        new_bond_force.addBond(p1, p2, length, k)
-        
-            elif isinstance(force_, HarmonicAngleForce):
-                for i in range(force_.getNumAngles()):
-                    p1, p2, p3, angle, k = force_.getAngleParameters(i)
-                    if p1 in selected_atoms and p2 in selected_atoms and p3 in selected_atoms:
-                        new_angle_force.addAngle(p1, p2, p3, angle, k)
-        
-            elif isinstance(force_, PeriodicTorsionForce):
-                for i in range(force_.getNumTorsions()):
-                    p1, p2, p3, p4, periodicity, phase, k = force_.getTorsionParameters(i)
-                    if p1 in selected_atoms and p2 in selected_atoms and p3 in selected_atoms and p4 in selected_atoms:
-                        new_torsion_force.addTorsion(p1, p2, p3, p4, periodicity, phase, k)
-
-            
-            elif isinstance(force_, CustomTorsionForce):
-                for i in range(force_.getNumTorsions()):
-                    p1, p2, p3, p4, params = force_.getTorsionParameters(i)
-                    if p1 in selected_atoms and p2 in selected_atoms and p3 in selected_atoms and p4 in selected_atoms:
-                        new_custom_torsion_force.addTorsion(p1, p2, p3, p4, params)
-        # Remove old forces and add the new ones
-        for fi in range(len(system.getForces()) - 1, -1, -1):
-            force_ = system.getForce(fi)
-            if isinstance(force_, CMAPTorsionForce):
-                force_.setForceGroup(14)
-                continue
-            elif isinstance(force_, NonbondedForce) and nonbonded:
-                mute_atoms = np.setdiff1d(np.arange(force_.getNumParticles()), selected_atoms)
-                silence_atoms_and_shift_charge(force_, t2.top, mute_atoms)
-                force_.setForceGroup(15)
-                continue
-            else:
-                system.removeForce(fi)  # Remove each old force
-        
-        system.addForce(new_bond_force)
-        system.addForce(new_angle_force)
-        system.addForce(new_torsion_force)
-        system.addForce(new_custom_torsion_force)
-
-        # Set integrator
+        # selected_atoms = index_map
+    
+        mask_added_atoms(system, fixer.topology, added_idxs)
+            # Set integrator
         integrator = LangevinMiddleIntegrator(300*kelvin, 1/picosecond, 0.002*picoseconds)
         context = Context(system, integrator)
-        context.setPositions(gro.positions)
+        context.setPositions(positions)
+    
         
         state = context.getState(getEnergy=True, getForces=True)
         
-        forces = state.getForces(asNumpy=True)[index_map] 
-  
+        forces = state.getForces(asNumpy=True)[keep] 
+    
         energy = state.getPotentialEnergy()
 
     return energy.value_in_unit(kilojoules_per_mole), -1 * forces
+
+
+
+# def mask_added_atoms(system: System, context: Context, topology, added_idxs):
+#     """
+#     Zero out bonded (k) and nonbonded (q, epsilon, 1-4) terms that touch any atom in added_idxs.
+#     Returns a restore() function that puts everything back exactly as before.
+#     """
+#     added = np.asarray(added_idxs, dtype=int)
+#     keep = np.ones(system.getNumParticles(), dtype=bool)
+#     keep[added] = False
+#     # Collect forces
+#     bond = angle = proper = c_tors = nb = None
+#     forces = [system.getForce(i) for i in range(system.getNumForces())]
+#     for f in forces:
+#         if isinstance(f, HarmonicBondForce):
+#             bond = f
+#         elif isinstance(f, HarmonicAngleForce):
+#             angle = f
+#         elif isinstance(f, PeriodicTorsionForce):
+#             proper = f
+#         elif isinstance(f, CustomTorsionForce):
+#             c_tors = f
+#         elif isinstance(f, NonbondedForce):
+#             nb = f
+
+
+#     if bond is not None:
+#         for i in range(bond.getNumBonds()):
+#             p1, p2, r0, k = bond.getBondParameters(i)
+#             if not (keep[p1] and keep[p2]):
+#                 bond.setBondParameters(i, p1, p2, r0, 0.0)
+
+#     if angle is not None:
+#         for i in range(angle.getNumAngles()):
+#             p1, p2, p3, theta0, k = angle.getAngleParameters(i)
+#             if not (keep[p1] and keep[p2] and keep[p3]):
+#                 angle.setAngleParameters(i, p1, p2, p3, theta0, 0.0)
+
+#     if proper is not None:
+#         for i in range(proper.getNumTorsions()):
+#             p1, p2, p3, p4, per, phase, k = proper.getTorsionParameters(i)
+#             if not (keep[p1] and keep[p2] and keep[p3] and keep[p4]):
+#                 proper.setTorsionParameters(i, p1, p2, p3, p4, per, phase, 0.0)
+
+#     if c_tors is not None:
+#         for i in range(c_tors.getNumTorsions()):
+#             p1, p2, p3, p4, params = c_tors.getTorsionParameters(i)
+#             if not (keep[p1] and keep[p2] and keep[p3] and keep[p4]):
+#                 # assume params = [theta0, k]
+#                 params = list(params)
+#                 if len(params) >= 2:
+#                     params[1] = 0.0
+#                 c_tors.setTorsionParameters(i, p1, p2, p3, p4, params)
+
+#     if nb is not None:
+#         # for i in range(nb.getNumParticles()):
+#         #     q, sig, eps = nb.getParticleParameters(i)
+#         #     if not keep[i]:
+#         #         nb.setParticleParameters(i, 0.0*q, sig, 0.0*eps)
+#         # for e in range(nb.getNumExceptions()):
+#         #     i, j, qprod, sig, eps = nb.getExceptionParameters(e)
+#         #     if not (keep[i] and keep[j]):
+#         #         nb.setExceptionParameters(e, i, j, 0.0*qprod, sig, 0.0*eps)
+#         silence_atoms_and_shift_charge(nb, topology, added_idxs, context)
+
+    
+#     context.reinitialize(preserveState=True)
+    
+def mask_added_atoms(system, topology, added_idxs):
+    """
+    High-performance masking that nullifies energy of added atoms 
+    without destroying the OpenMM Context.
+    """
+    added = set(added_idxs) # Changed to set for O(1) lookups
+    for force in system.getForces():
+        # Bonded Terms: Zero out the force constant (k)
+        if isinstance(force, HarmonicBondForce):
+            for i in range(force.getNumBonds()):
+                p1, p2, r0, k = force.getBondParameters(i)
+                if p1 in added or p2 in added:
+                    force.setBondParameters(i, p1, p2, r0, 0.0)
+            # force.updateParametersInContext(context) # Efficient GPU update
+
+        elif isinstance(force, HarmonicAngleForce):
+            for i in range(force.getNumAngles()):
+                p1, p2, p3, t0, k = force.getAngleParameters(i)
+                if any(p in added for p in [p1, p2, p3]):
+                    force.setAngleParameters(i, p1, p2, p3, t0, 0.0)
+            # force.updateParametersInContext(context)
+
+        elif isinstance(force, (PeriodicTorsionForce, CustomTorsionForce)):
+            for i in range(force.getNumTorsions()):
+                p1, p2, p3, p4, *params = force.getTorsionParameters(i)
+                if any(p in added for p in [p1, p2, p3, p4]):
+                    # Set the force constant (last param for Periodic, index 1 for Custom) to 0
+                    if isinstance(force, PeriodicTorsionForce):
+                        force.setTorsionParameters(i, p1, p2, p3, p4, params[0], params[1], 0.0)
+                    else:
+                        new_p = list(params[0]); new_p[1] = 0.0
+                        force.setTorsionParameters(i, p1, p2, p3, p4, new_p)
+            # force.updateParametersInContext(context)
+
+        # CMAP: Critical for CHARMM alignment
+        elif isinstance(force, CMAPTorsionForce):
+            continue
+
+        # Nonbonded: Shift charges and zero Van der Waals
+        elif isinstance(force, NonbondedForce):
+            silence_atoms_and_shift_charge(force, topology, added_idxs)
+            # force.updateParametersInContext(context)
+
+
+
+
+def generic_traj_to_energy(topology: md.Topology, xyz: np.ndarray, ff_name, solv_name, groups=None):
+    gradients = np.zeros_like(xyz)
+    energies = np.zeros(xyz.shape[0])
+    for i in range(xyz.shape[0]):
+        energy, gradient = generic_structure_to_energy(topology, xyz[i:i+1], ff_name, solv_name, groups=groups) 
+        energies[i] = energy
+        gradients[i] = gradient
+    return energies, gradients * angstrom / nanometer
+
+def amber_solv_traj_to_energy(topology: md.Topology, xyz: np.ndarray):
+    return generic_traj_to_energy(topology, xyz, "amber14-all.xml", "implicit/gbn2.xml")
+
+def charmm_solv_traj_to_energy(topology: md.Topology, xyz: np.ndarray, groups=None):
+    return generic_traj_to_energy(topology, xyz, "charmm36.xml", "implicit/gbn2.xml", groups=groups)
+
+def amber_solv_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
+    return generic_structure_to_energy(topology, xyz, "amber14-all.xml", "implicit/gbn2.xml")
+
+def charmm_solv_structure_to_energy(topology: md.Topology, xyz: np.ndarray, groups=None):
+    # return generic_structure_to_energy(topology, xyz, "charmm/charmm36.xml", None)
+    return generic_structure_to_energy(topology, xyz, "charmm36.xml", "implicit/gbn2.xml", groups=groups)
+
+def generic_structure_to_energy(topology: md.Topology, xyz: np.ndarray, ff_name, solv_name, groups=None):
+    t = md.Trajectory(xyz, topology)
+
+
+    with tempfile.TemporaryDirectory(prefix=fb_temp_dir()) as temp_dir:
+        pdb_file = f'{temp_dir}/temp.pdb'
+        t.save_pdb(pdb_file)
+    # --- AMBER14 with implicit solvent (GBn2) ---
+        fixer = PDBFixer(filename=pdb_file)
+    fixer.findMissingResidues()
+    fixer.findNonstandardResidues()
+    fixer.replaceNonstandardResidues()
+    
+    # ---- Example usage ----
+    # Build OpenMM objects from the fixed structure
+    
+    
+    # Snapshot BEFORE adding atoms
+    fixer.findMissingAtoms()
+    ctr0, _ = counter_from_topology(fixer.topology)
+    
+    fixer.addMissingAtoms()
+    
+    # Snapshot AFTER addMissingAtoms, BEFORE hydrogens
+    # fixer.addMissingAtoms()
+    if solv_name is None:
+        ff = ForceField(ff_name)
+    else:
+        ff = ForceField(ff_name, solv_name)
+    fixer.addMissingHydrogens(pH=7.0, forcefield=ff)
+    ctr1, idx_after_atoms = counter_from_topology(fixer.topology)
+    added, added_idxs = diff_added_atoms(ctr0, ctr1, idx_after_atoms)
+    # Define the output PDB filename
+    positions = fixer.positions
+    
+    # print(f"\nAdded {len(added_h)} hydrogens:")
+    system = ff.createSystem(
+        fixer.topology,
+        nonbondedMethod=NoCutoff,   # implicit solvent: NoCutoff / CutoffNonPeriodic / CutoffPeriodic only
+        constraints=HBonds
+    )
+
+    if groups is not None:
+        idx_Coul, idx_Coul_14 = split_coulomb(system)
+            
+        MISC_GROUP, BOND_GROUP, ANGLE_GROUP, TORSION_GROUP, LJ_GROUP, LJ_14_GROUP, COUL_GROUP, COUL_14_GROUP, GB_GROUP = tag_force_groups(
+            system, idx_Coul, idx_Coul_14,
+        )
+
+    move_set = set(added_idxs)  # e.g., all hydrogens + all atoms in N- and C-termini
+    # Build a 0/1 mask per DoF (1 = movable, 0 = frozen)
+    n = system.getNumParticles()
+    # mask_vecs = [Vec3(1,1,1) if i in move_set else Vec3(0,0,0) for i in range(n)]
+    mask_vecs = [Vec3(1,1,1) for i in range(n)]
+    # Custom "minimizer" integrator: naive steepest descent with a tiny step
+    integ = CustomIntegrator(0.0)
+    integ.addPerDofVariable("m", 0)         # per-DoF mask
+    integ.addGlobalVariable("alpha", 1e-7)  # small step size (nm / (kJ/mol/nm)); tuned empirically
+    integ.addComputePerDof("x", "x + alpha*m*f")
+    integ.setConstraintTolerance(1e-3)
+    integ.addConstrainPositions()
+    
+    
+
+    platform = None
+    platform_props = {}
+
+    
+    for name, props in [
+        ("CUDA", {"DeviceIndex": "0", "Precision": "mixed", "DeterministicForces": "true"}),
+        ("OpenCL", {"OpenCLPlatformIndex": "0", "OpenCLDeviceIndex": "0", "Precision": "single"}),
+        ("CPU", {}),
+    ]:
+        try:
+            platform = Platform.getPlatformByName(name)
+            platform_props = props
+            if platform.getName() == "CPU":
+                warnings.warn("Falling back to CPU platform. This will be slower.", RuntimeWarning)
+            
+            break
+        except Exception:
+            continue
+
+    # CREATE Simulation first
+    sim = Simulation(fixer.topology, system, integ, platform, platform_props)
+    sim.context.setPositions(positions)
+    
+    # NOW set the mask on the Context (critical)
+    integ.setPerDofVariableByName("m", mask_vecs)
+    # sim = Simulation(topology, system, integ, platform, platform_props)
+    # sim.context.setPositions(positions)
+    
+
+    ref_positions = sim.context.getState(getPositions=True).getPositions(asNumpy=True)
+    # heavy_idxs = reset_nonH_nonOXT_positions(sim, ref_positions)
+    for _ in range(500):
+        sim.step(10)
+        heavy_idxs = reset_nonH_nonOXT_positions(sim, ref_positions)
+    for _ in range(500):
+        sim.step(1)
+        heavy_idxs = reset_nonH_nonOXT_positions(sim, ref_positions)
+        
+    if groups is not None:  
+        group_dict = {
+            "Misc": MISC_GROUP, 
+            "Bond": BOND_GROUP, 
+            "Angle": ANGLE_GROUP, 
+            "Torsion": TORSION_GROUP, 
+            "LJ": LJ_GROUP, 
+            "LJ-14": LJ_14_GROUP, 
+            "Coulomb": COUL_GROUP, 
+            "Coulomb-14": COUL_14_GROUP, 
+            "GB": GB_GROUP
+        }
+        state = sim.context.getState(getEnergy=True, getForces=True, groups=set(group_dict[g] for g in groups))
+    else:
+        state = sim.context.getState(getEnergy=True, getForces=True)
+    
+    forces = state.getForces(asNumpy=True)
+    heavy_forces = forces[heavy_idxs, :] 
+
+    energy = state.getPotentialEnergy()
+    return energy.value_in_unit(kilojoules_per_mole), -1 * heavy_forces
+
+
+
+   
+
+# ---- Helpers to EXCLUDE selected forces from total energy ----
+def _force_group_map(system):
+    """Return {group_index: Force} after you've assigned per-force groups."""
+    return {system.getForce(g).getForceGroup(): system.getForce(g)
+            for g in range(system.getNumForces())}
+
+def _included_groups(system, exclude_groups):
+    """Return a set of group indices to include = all groups minus exclude_groups."""
+    include = set()
+    for g in range(system.getNumForces()):
+        # we set ForceGroup(g)=g below, so 'g' is the group id
+        if g not in exclude_groups:
+            include.add(g)
+    return include
+
+
+#OLD 
+
 
 def rdkit_traj_to_energy(topology: md.Topology, xyz: np.ndarray):
     gradients = np.zeros_like(xyz)
@@ -205,7 +447,7 @@ def rdkit_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
     """
     blocker = rdBase.BlockLogs()
     t = md.Trajectory(xyz, topology)
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(prefix=fb_temp_dir()) as temp_dir:
         t.save_pdb(f'{temp_dir}/temp.pdb')
         mol = Chem.MolFromPDBFile(f'{temp_dir}/temp.pdb')
     if mol.GetNumConformers() == 0:
@@ -222,104 +464,3 @@ def rdkit_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
     gradients = np.array(ff.CalcGrad())
     # gradients = torch.from_numpy(gradients)
     return energy, gradients.reshape(-1, 3)
-
-def amber_solv_traj_to_energy(topology: md.Topology, xyz: np.ndarray):
-    gradients = np.zeros_like(xyz)
-    energies = np.zeros(xyz.shape[0])
-    for i in range(xyz.shape[0]):
-        energy, gradient = amber_solv_structure_to_energy(topology, xyz[i:i+1])  # External function call
-        energies[i] = energy
-        gradients[i] = gradient
-    return energies, gradients * angstrom / nanometer
-
-def amber_solv_structure_to_energy(topology: md.Topology, xyz: np.ndarray):
-    t = md.Trajectory(xyz, topology)
-    
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        pdb_file = f'{temp_dir}/temp.pdb'
-        t.save_pdb(pdb_file)
-    # --- AMBER14 with implicit solvent (GBn2) ---
-        fixer = PDBFixer(filename=pdb_file)
-    fixer.findMissingResidues()
-    fixer.findNonstandardResidues()
-    fixer.replaceNonstandardResidues()
-    
-    # ---- Example usage ----
-    # Build OpenMM objects from the fixed structure
-    
-    
-    # Snapshot BEFORE adding atoms
-    fixer.findMissingAtoms()
-    ctr0, _ = counter_from_topology(fixer.topology)
-    
-    fixer.addMissingAtoms()
-    
-    # Snapshot AFTER addMissingAtoms, BEFORE hydrogens
-    ctr1, idx_after_atoms = counter_from_topology(fixer.topology)
-    added_heavy, added_heavy_idxs = diff_added_atoms(ctr0, ctr1, idx_after_atoms)
-    ff = ForceField("amber14-all.xml", "implicit/gbn2.xml")
-    fixer.addMissingHydrogens(pH=7.0, forcefield=ff)
-    topology  = fixer.topology
-    positions = fixer.positions
-    # Snapshot AFTER hydrogens
-    ctr2, idx_after_H = counter_from_topology(fixer.topology)
-    added_h, added_h_idxs = diff_added_atoms(ctr1, ctr2, idx_after_H)
-    # Define the output PDB filename
-
-    
-    # print(f"\nAdded {len(added_h)} hydrogens:")
-    system = ff.createSystem(
-        fixer.topology,
-        nonbondedMethod=NoCutoff,   # implicit solvent: NoCutoff / CutoffNonPeriodic / CutoffPeriodic only
-        constraints=HBonds
-    )
-    
-    added_idxs = np.concatenate([added_heavy_idxs, added_h_idxs])
-
-    move_set = set(added_idxs)  # e.g., all hydrogens + all atoms in N- and C-termini
-    # Build a 0/1 mask per DoF (1 = movable, 0 = frozen)
-    n = system.getNumParticles()
-    mask_vecs = [Vec3(1,1,1) if i in move_set else Vec3(0,0,0) for i in range(n)]
-    
-    # Custom "minimizer" integrator: naive steepest descent with a tiny step
-    integ = CustomIntegrator(0.0)
-    integ.addPerDofVariable("m", 0)         # per-DoF mask
-    integ.addGlobalVariable("alpha", 1e-7)  # small step size (nm / (kJ/mol/nm)); tuned empirically
-    integ.addComputePerDof("x", "x + alpha*m*f")
-    integ.addConstrainPositions()
-    
-    # IMPORTANT: set the mask AFTER Simulation is created
-    integ.setPerDofVariableByName("m", mask_vecs)
-
-    platform = None
-    platform_props = {}
-    for name, props in [
-        ("CUDA", {"DeviceIndex": "0", "Precision": "mixed", "DeterministicForces": "true"}),
-        ("OpenCL", {"DeviceIndex": "0", "Precision": "single"}),
-        ("CPU", {}),
-    ]:
-        try:
-            platform = Platform.getPlatformByName(name)
-            platform_props = props
-            break
-        except Exception:
-            continue
-    if platform.getName() == "CPU":
-        warnings.warn("Falling back to CPU platform. This will be slower.", RuntimeWarning)
-    sim = Simulation(topology, system, integ, platform, platform_props)
-    sim.context.setPositions(positions)
-    
-    ref_positions = sim.context.getState(getPositions=True).getPositions(asNumpy=True)
-    for _ in range(500):
-        sim.step(10)
-    heavy_idxs = reset_nonH_nonOXT_positions(sim, ref_positions)
-
-    state = sim.context.getState(getEnergy=True, getForces=True)
-    
-    forces = state.getForces(asNumpy=True)
-    heavy_forces = forces[heavy_idxs, :] 
-
-    energy = state.getPotentialEnergy()
-
-    return energy.value_in_unit(kilojoules_per_mole), -1 * heavy_forces

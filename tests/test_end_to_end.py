@@ -19,7 +19,7 @@ def _build_rdkit_molecule():
     AllChem.EmbedMolecule(mol, randomSeed=0xf00d)
     AllChem.UFFOptimizeMolecule(mol)
     block = Chem.MolToPDBBlock(mol)
-    with tempfile.NamedTemporaryFile('w+', suffix='.pdb') as tmp:
+    with tempfile.NamedTemporaryFile('w+', suffix='.pdb', prefix='') as tmp:
         tmp.write(block)
         tmp.flush()
         traj = md.load(tmp.name)

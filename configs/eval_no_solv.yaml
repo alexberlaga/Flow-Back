@@ -18,4 +18,4 @@ save_dcd: false        # Also save trajectories as DCD
 overwrite: true        # Overwrite existing outputs
 t_flip: 0.25           # Fraction of steps to attempt chirality flips
 type_flip: 'ref-ter'   # Chirality flipping scheme
-ff: 'CHARMM-solv'
+ff: 'CHARMM'

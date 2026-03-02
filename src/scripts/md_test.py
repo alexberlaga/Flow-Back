@@ -12,6 +12,7 @@ import mdtraj as md
 import MDAnalysis as mda
 from collections import defaultdict
 from src.file_config import FLOWBACK_DATA, FLOWBACK_OUTPUTS
+from src.utils.energy_helpers import *
 
 def _osremove(f):
     try:
@@ -99,7 +100,7 @@ def silence_atoms_and_shift_charge(nbforce, topology, mute, context=None):
         push the new parameters with `updateParametersInContext`.
     """
     mute    = set(int(i) for i in mute)
-    shifts  = defaultdict(lambda: 0.0*elementary_charge)   # charge → heavy atom
+    shifts  = defaultdict(lambda: 0.0*elementary_charge)   # chsarge → heavy atom
     nbforce.setUseDispersionCorrection(False)
     # nbforce.setNonbondedMethod(NonbondedForce.CutoffPeriodic)
     # ------------------------------------------------------------------
@@ -153,11 +154,133 @@ def silence_atoms_and_shift_charge(nbforce, topology, mute, context=None):
         else:
             nbforce.setExceptionParameters(k, i, j, qi*qj, sigma, eps)
         
-def run_simulation(index, pdb_file, noh, save):
+
+
+
+def run_simulation(index, pdb_file, ff_name='charmm36.xml', solv_name='implicit/gbn2.xml'):
+    print(f"Starting simulation {index} with {pdb_file}...")
+    fixer = PDBFixer(filename=pdb_file)
+    fixer.findMissingResidues()
+    fixer.findNonstandardResidues()
+    fixer.replaceNonstandardResidues()
+    
+    # ---- Example usage ----
+    # Build OpenMM objects from the fixed structure
+    
+    
+    # Snapshot BEFORE adding atoms
+    fixer.findMissingAtoms()
+    ctr0, _ = counter_from_topology(fixer.topology)
+    
+    fixer.addMissingAtoms()
+    
+    # Snapshot AFTER addMissingAtoms, BEFORE hydrogens
+    # fixer.addMissingAtoms()
+    if solv_name is None:
+        ff = ForceField(ff_name)
+    else:
+        ff = ForceField(ff_name, solv_name)
+    fixer.addMissingHydrogens(pH=7.0, forcefield=ff)
+    ctr1, idx_after_atoms = counter_from_topology(fixer.topology)
+    added, added_idxs = diff_added_atoms(ctr0, ctr1, idx_after_atoms)
+    # Define the output PDB filename
+    positions = fixer.positions
+    
+    # print(f"\nAdded {len(added_h)} hydrogens:")
+    system = ff.createSystem(
+        fixer.topology,
+        nonbondedMethod=NoCutoff,   # implicit solvent: NoCutoff / CutoffNonPeriodic / CutoffPeriodic only
+        constraints=HBonds
+    )
+
+   
+
+    move_set = set(added_idxs)  # e.g., all hydrogens + all atoms in N- and C-termini
+    # Build a 0/1 mask per DoF (1 = movable, 0 = frozen)
+    n = system.getNumParticles()
+    # mask_vecs = [Vec3(1,1,1) if i in move_set else Vec3(0,0,0) for i in range(n)]
+    mask_vecs = [Vec3(1,1,1) for i in range(n)]
+    # Custom "minimizer" integrator: naive steepest descent with a tiny step
+    integ_min = CustomIntegrator(0.0)
+    integ_min.addPerDofVariable("m", 0)         # per-DoF mask
+    integ_min.addGlobalVariable("alpha", 1e-7)  # small step size (nm / (kJ/mol/nm)); tuned empirically
+    integ_min.addComputePerDof("x", "x + alpha*m*f")
+    integ_min.setConstraintTolerance(1e-3)
+    integ_min.addConstrainPositions()
+    
+    timestep = 0.002*picoseconds 
+    integ_sim = LangevinMiddleIntegrator(300*kelvin, 1/picosecond, timestep)
+    integrator = CompoundIntegrator()
+    integrator.addIntegrator(integ_min)   
+    integrator.addIntegrator(integ_sim) 
+    platform = None
+    platform_props = {}
+
+    
+    for name, props in [
+        ("CUDA", {"DeviceIndex": "0", "Precision": "mixed", "DeterministicForces": "true"}),
+        ("OpenCL", {"OpenCLPlatformIndex": "0", "OpenCLDeviceIndex": "0", "Precision": "single"}),
+        ("CPU", {}),
+    ]:
+        try:
+            platform = Platform.getPlatformByName(name)
+            platform_props = props
+            if platform.getName() == "CPU":
+                warnings.warn("Falling back to CPU platform. This will be slower.", RuntimeWarning)
+            
+            break
+        except Exception:
+            continue
+
+    # CREATE Simulation first
+    try:
+        sim = Simulation(fixer.topology, system, integrator, platform, platform_props)
+        sim.context.setPositions(positions)
+        system.addForce(CMMotionRemover(1000))
+        # NOW set the mask on the Context (critical)
+        integ_min.setPerDofVariableByName("m", mask_vecs)
+        integrator.setCurrentIntegrator(0)
+        
+        ref_positions = sim.context.getState(getPositions=True).getPositions(asNumpy=True)
+        for _ in range(500):
+            sim.step(10)
+            heavy_idxs = reset_nonH_nonOXT_positions(sim, ref_positions)
+        for _ in range(500):
+            sim.step(1)
+            heavy_idxs = reset_nonH_nonOXT_positions(sim, ref_positions)
+        
+        integrator.setCurrentIntegrator(1)
+        sim.context.setVelocitiesToTemperature(300*kelvin)
+        
+        # Run a short step to check stability before full simulation
+        sim.step(100)
+
+        # Extract energy and check for NaNs
+        state = sim.context.getState(getEnergy=True, getForces=True)
+        potential_energy = state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
+        forces = state.getForces(asNumpy=True)
+    
+        force_mags = np.linalg.norm(forces, axis=1)[heavy_idxs]
+
+        if potential_energy != potential_energy:  # NaN check
+            print(f"Simulation {index} failed: NaN in potential energy.")
+            return False, np.max(force_mags)
+
+        # Run the full simulation
+        sim.step(20000)
+
+    except Exception as e:
+        print(f"Simulation {index} crashed: {e}")
+        return False, np.max(force_mags)
+
+    print(f"Simulation {index} completed successfully.")
+    return True, np.max(force_mags)
+
+def run_simulation_gmx(index, pdb_file, noh, save):
     print(f"Starting simulation {index} with {pdb_file}...")
 
     # Use a temporary directory to avoid unwanted backup files
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(prefix='/project2/andrewferguson/berlaga') as temp_dir:
         if save:
             temp_dir = 'saved_trajs'
         structure_file = f"{temp_dir}/structure_{index}.gro"
@@ -292,46 +415,53 @@ def run_simulation(index, pdb_file, noh, save):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run GROMACS pdb2gmx with a specified PDB file.")
+    parser = argparse.ArgumentParser(description="MD Test")
     parser.add_argument("--model", help="Input Model")
     parser.add_argument("--checkpoint", type=str)
+    parser.add_argument("--noise", type=str)
+    parser.add_argument("--solver", type=str)
     parser.add_argument("--protein", help="Input protein")
-    parser.add_argument("--nomodel", action='store_true')
-    parser.add_argument("--nosuffix", action='store_true')
+    parser.add_argument("--benchmark", action='store_true')
+    parser.add_argument("--nosolver", action='store_true')
     parser.add_argument("--noh", action='store_true')
     parser.add_argument("--save", action="store_true")
     parser.add_argument("--num_files", "-n", type=int, default=0, help="number of files")
+    
     args = parser.parse_args()
     model = args.model
+    noise = args.noise
+    checkpoint = args.checkpoint
+    if not args.nosolver:
+        solver = args.solver
     
-    if args.nomodel:
+    if args.benchmark:
         pdb_files = glob.glob(f"{FLOWBACK_DATA}/{args.protein}_clean_AA/*.pdb")
-        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_nomodel_stats.txt"
-    elif args.nosuffix: 
-        pdb_files = glob.glob(f"{FLOWBACK_OUTPUTS}/{args.protein}/{model}/*.pdb")
-        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_{model}_stats.txt"
+        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_benchmark_stats.txt"
+    elif args.nosolver: 
+        pdb_files = glob.glob(f"{FLOWBACK_OUTPUTS}/{args.protein}/{model}_ckp-{checkpoint}_noise-{noise}/*.pdb")
+        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_{model}_ckp-{checkpoint}_noise-{noise}_stats.txt"
     elif args.num_files == 0:
-        pdb_files = glob.glob(f"{FLOWBACK_OUTPUTS}/{args.protein}/{model}_noise-0.003/*.pdb")
-        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_{model}_stats.txt"
+        pdb_files = glob.glob(f"{FLOWBACK_OUTPUTS}/{args.protein}/{model}_ckp-{checkpoint}_noise-{noise}_{solver}/*.pdb")
+        stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_{model}_ckp-{checkpoint}_noise-{noise}_{solver}_stats.txt"
     else:
         pdb_files = [f"{FLOWBACK_OUTPUTS}/{args.protein}/{model}_noise-0.003/frame_{i}_1.pdb" for i in range(args.num_files)]
         stat_file = f"{FLOWBACK_OUTPUTS}/stat_files/{args.protein}_{model}_stats.txt"
-
+    
     if args.noh:
         stat_file = f'{stat_file[:-4]}_noh.txt'
     _osremove(stat_file)
     failed_simulations = []
     for i, pdb_file in enumerate(pdb_files):
-        if args.save:
-            success, max_force = run_simulation(i, pdb_file, args.noh, True)
+    #     if args.save:
+    #         success, max_force = run_simulation(i, pdb_file, args.noh, True)
+    #         if not success:
+    #             failed_simulations.append(i)
+    #     else:
+        with open(stat_file, 'a') as f:
+            success, max_force = run_simulation(i, pdb_file)
             if not success:
                 failed_simulations.append(i)
-        else:
-            with open(stat_file, 'a') as f:
-                success, max_force = run_simulation(i, pdb_file, args.noh, False)
-                if not success:
-                    failed_simulations.append(i)
-                f.write(f'{i}\t{success}\t{max_force:.1f}\n')
+            f.write(f'{i}\t{success}\t{max_force:.1f}\n')
 
     print("\nSummary:")
     print(f"Total simulations: {len(pdb_files)}")

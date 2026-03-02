@@ -1,5 +1,5 @@
 import os, tempfile
-from src.file_config import FLOWBACK_OUTPUTS
+from src.file_config import FLOWBACK_OUTPUTS, fb_temp_dir
 from .model import *
 import yaml
 import glob
@@ -49,18 +49,20 @@ def process_pro_aa(load_dir, stride=1):
         idx_list = []
         atom_cnt = 0
         x = y = z = 0.000
-        resseqs = sorted(set(res.resSeq for res in cg_trj.topology.residues))
-        for i in resseqs:
-            first_atom = cg_trj.top.select(f'resSeq {i}')[0]
+        resids = sorted(set(res.index for res in cg_trj.topology.residues))
+        chain_id_map = {}
+        for ch in aa_top.chains:
+            chain_id_map[ch.index] = chr(ord('A') + ch.index)
+        for i in resids:
+            first_atom = cg_trj.top.select(f'resid {i}')[0]
             res_ = cg_trj.top.atom(first_atom).residue
             one_letter = THREE_TO_ONE_LETTER_MAP[res_.name]
             atom_map = ATOM_MAP_14[one_letter]
-
+            
             for a in atom_map:
                 if a=='PAD': break
-
                 try:    
-                    idx = aa_top.select(f'resSeq {i} and name {a}')[0]
+                    idx = aa_top.select(f'resid {i} and name {a}')[0]
                     idx_list.append(idx)
                     #if a=='CA': msk_idxs.append(i)
 
@@ -68,7 +70,9 @@ def process_pro_aa(load_dir, stride=1):
                     atom_serial = f"{atom_cnt+1:5d}"
                     atom_name = f"{a:>4}"  # {a:^4} Centered in a 4-character width, adjust as needed
                     residue_name = f"{res_.name:3}"
-                    chain_id = "A"
+                    # chain_id = "A"
+                    chain = res_.chain
+                    chain_id = chain_id_map[chain.index]
                     residue_number = f"{res_.index+1:4d}"
                     x_coord = f"{x:8.3f}"
                     y_coord = f"{y:8.3f}"
@@ -80,7 +84,7 @@ def process_pro_aa(load_dir, stride=1):
                     aa_pdb += f"ATOM  {atom_serial} {atom_name} {residue_name} {chain_id}{residue_number}    {x_coord}{y_coord}{z_coord}{occupancy}{temp_factor}           {element_symbol}\n"
 
                 except:
-                    print(f'No matching atom! {a, i, residue_name, residue_number}')
+                    print(f'No matching atom! {a, i, residue_name}')
 
                 atom_cnt += 1
 
@@ -94,7 +98,7 @@ def process_pro_aa(load_dir, stride=1):
         xyz = aa_trj.xyz[:, np.array(idx_list)]
 
         # Save txt as temporary pdb and load new molecules
-        with tempfile.NamedTemporaryFile(mode='w+', suffix='.pdb', delete=True) as tmp:
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.pdb', delete=True, prefix=fb_temp_dir()) as tmp:
             tmp.write(aa_pdb)
             tmp.flush()  # Ensure content is written to disk before reading
             trj_aa_fix = md.load(tmp.name)
@@ -190,7 +194,7 @@ def process_pro_cg(load_dir, stride=1):
         xyz[:, np.array(ca_idxs)] = cg_xyz
 
         # save txt as temporary pdb and load new molecules
-        with tempfile.NamedTemporaryFile(mode='w+', suffix='.pdb', delete=True) as tmp: 
+        with tempfile.NamedTemporaryFile(mode='w+', suffix='.pdb', delete=True, prefix=fb_temp_dir()) as tmp:
             tmp.write(aa_pdb)
             tmp.flush()  # Ensure content is written to disk before reading
             trj_aa_fix = md.load(tmp.name)

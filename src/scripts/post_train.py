@@ -36,8 +36,8 @@ from src.utils.evaluation import (
     process_pro_cg,
     split_list,
 )
-from src.utils.model import ModelWrapper, PostTrainDataset, atom_to_steps
-
+from src.utils.model import ModelWrapper, PostTrainDataset, atom_to_steps, get_or_build_cache, build_lj_cache, build_bond_cache, build_angle_cache, build_hbond_cache, get_amber_data, get_charmm_data, topology_signature_by_sequence
+import pickle
 
 def setup_args(parser: ArgumentParser) -> ArgumentParser:
     """Attach script specific arguments."""
@@ -74,6 +74,11 @@ def get_args() -> Tuple[Any, Any]:
     config_args = config_to_args(config)
     return args, config_args
 
+def zero_loss_like(model, device, dtype=torch.float32):
+    # scalar leaf; then "touch" all params so grads are defined but zero
+    z = torch.zeros((), device=device, dtype=dtype, requires_grad=True)
+    z = z + sum((p.sum() * 0.0) for p in model.parameters())
+    return z
 
 def _select_timesteps(N, split=0.8, num_samples=10, seed=None):
     """Randomly select timesteps from a range [0, N-1]."""
@@ -119,12 +124,20 @@ class PostTrainModule(pl.LightningModule):
         charmm_ff: str,
         int_ff: bool,
         max_grad: float,
-        t_flip: float,
         job_dir: str,
         selection_split: float,
+        use_angles: bool,
+        use_hbonds: bool,
+        rtp_data,
+        lj_data,
+        bond_data,
+        angle_data,
         compare: bool = False,
         test: bool = False,
         agb: int = 16,
+        int_chi = False,
+        gamma: float = 1.0,
+        half_life: int = 800,
     ) -> None:
         super().__init__()
         self.model = deepcopy(base_model)
@@ -141,7 +154,6 @@ class PostTrainModule(pl.LightningModule):
         self.charmm_ff = charmm_ff
         self.int_ff = int_ff
         self.max_grad = max_grad
-        self.t_flip = t_flip
         self.job_dir = job_dir
         self.selection_split = selection_split
         self.compare = compare
@@ -149,12 +161,32 @@ class PostTrainModule(pl.LightningModule):
         self.losses_epoch: list[float] = []
         self.all_losses: list[float] = []
         self.agb = agb
+        self.gamma = gamma
+        self.half_life = half_life
+        self.int_chi = int_chi
+        self.use_angles = use_angles
+        self.use_hbonds = use_hbonds
+        self.rtp_data = rtp_data
+        self.lj_data = lj_data
+        self.bond_data = bond_data
+        self.angle_data = angle_data
+
+        self.LJ_CACHE = {}
+        self.BOND_CACHE = {}
+        self.ANGLE_CACHE = {}
+        self.HBOND_CACHE = {}
+        self.CACHE_BYTES = {
+            "lj": 0,
+            "bond": 0,
+            "angle": 0,
+            "hbond": 0,
+        }
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=self.lr, weight_decay=self.wdecay
         )
-        scheduler = StepLR(optimizer, step_size=80, gamma=0.5)
+        scheduler = StepLR(optimizer, step_size=(self.half_life // self.agb), gamma=self.gamma)
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -181,6 +213,13 @@ class PostTrainModule(pl.LightningModule):
             atom_feats=atom_feats,
             ca_pos=ca_pos,
         )
+        lj_cache = get_or_build_cache(topology, self.LJ_CACHE, 'lj', self.CACHE_BYTES, build_lj_cache, self.rtp_data, self.lj_data, self.ff, self.device, onefour_scale=0.5, cutoff=None)
+        bond_cache = get_or_build_cache(topology, self.BOND_CACHE, 'bond', self.CACHE_BYTES, build_bond_cache, self.rtp_data, self.bond_data, self.ff, self.device)
+        angle_cache = get_or_build_cache(topology, self.ANGLE_CACHE, 'angle', self.CACHE_BYTES, build_angle_cache, self.rtp_data, self.angle_data, self.ff, self.device, heavy_only=True)
+        if use_hbonds:
+            hbond_cache = get_or_build_cache(topology, self.HBOND_CACHE, 'hbond', self.CACHE_BYTES, build_hbond_cache, self.rtp_data, self.ff, self.device)
+        else:
+            hbond_cache = None
         kwargs = {
             "job_dir": self.job_dir,
             "topology": topology,
@@ -193,12 +232,17 @@ class PostTrainModule(pl.LightningModule):
             "num_steps": self.num_steps,
             "ff": self.ff,
             "charmm_ff": self.charmm_ff,
+            "use_angles": self.use_angles,
+            "use_hbonds": self.use_hbonds,
+            "lj_cache": lj_cache,
+            "bond_cache": bond_cache,
+            "angle_cache": angle_cache,
+            "hbond_cache": hbond_cache,
             "int_ff": self.int_ff,
             "max_grad": self.max_grad,
-            "t_flip": self.t_flip,
             "compare": self.compare,
+            "int_chi": self.int_chi,
         }
-
         if self.compare:
             try:
                 energy = trajectory_and_adjoint(model_wrpd, model_ft_wrpd, **kwargs)
@@ -209,11 +253,12 @@ class PostTrainModule(pl.LightningModule):
                     f.write(str(energy) + '\n') 
             except Exception:
                 pass
-            loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+            loss = zero_loss_like(model_ft_wrpd, self.device)
         elif self.test:
-            traj, a_t = trajectory_and_adjoint(
+            traj, a_t, energy = trajectory_and_adjoint(
                 model_wrpd, model_ft_wrpd, **kwargs
             )
+            print(energy)
             select_steps = _select_timesteps(
                 self.num_steps, self.selection_split
             ).to(self.device)
@@ -246,7 +291,7 @@ class PostTrainModule(pl.LightningModule):
             loss = loss_total
         else:
             try:
-                traj, a_t = trajectory_and_adjoint(
+                traj, a_t, energy = trajectory_and_adjoint(
                     model_wrpd, model_ft_wrpd, **kwargs
                 )
                 select_steps = _select_timesteps(
@@ -279,8 +324,10 @@ class PostTrainModule(pl.LightningModule):
                         **kwargs,
                     )
                 loss = loss_total
+               
             except Exception:
-                loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+                print('excepting')
+                loss = zero_loss_like(model_ft_wrpd, self.device)
 
         self.losses_epoch.append(loss.detach().cpu().item())
         if (self.global_step + 1) % 10 == 0 and not self.compare and not self.test:
@@ -294,6 +341,7 @@ class PostTrainModule(pl.LightningModule):
             )
 
         return loss
+
 
     def on_train_epoch_end(self):
         if self.losses_epoch:
@@ -311,6 +359,8 @@ class PostTrainModule(pl.LightningModule):
         self.losses_epoch = []
 
 
+
+
 if __name__ == "__main__":
     import random
     import yaml
@@ -325,6 +375,9 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+    
+
+    
     config_yaml = f"{FLOWBACK_BASE}/configs/pre_train.yaml"
 
     load_dir = config_args.load_dir
@@ -350,21 +403,37 @@ if __name__ == "__main__":
     pdb_list = config_args.pdb_list
     restart = config_args.restart
     selection_split = config_args.selection_split
-
+    
+    
+    ff = getattr(config_args, "ff", "RDKit")
+    int_ff = getattr(config_args, "int_ff", False)
     MAX_GRAD = getattr(config_args, "max_grad", 5e3)
-    t_flip = getattr(config_args, "t_flip", 0.55)
     charmm_ff = getattr(config_args, "charmm_ff", "auto")
+    int_chi = getattr(config_args, "int_chi", False)
+    gamma = getattr(config_args, "gamma", 0.75)
+    half_life = getattr(config_args, "half_life", 800)
+    use_angles = bool(getattr(config_args, "use_angles", True))
+    use_hbonds = bool(getattr(config_args, "use_hbonds", False))
+    # ff_dir = None
+    # if ff == 'CHARMM':
+    #     ff_dir = ensure_charmm_ff(charmm_ff)
+    if 'CHARMM' in ff:
+        rtp_data, lj_data, bond_data, angle_data = get_charmm_data()
+    else:
+        rtp_data, lj_data, bond_data, angle_data = get_amber_data()
+
+   
     os.environ['FLOWBACK_TEMP_DIR_LOC'] = getattr(config_args, "temp_dir_loc", "~")
+
+    
 
     job_dir = f"{FLOWBACK_JOBDIR}/{save_dir}_post"
     os.makedirs(job_dir, exist_ok=True)
 
     shutil.copyfile(config_yaml, f"{job_dir}/config.yaml")
 
-    ff = getattr(config_args, "ff", "RDKit")
-    int_ff = getattr(config_args, "int_ff", False)
-    if ff == 'CHARMM':
-        ensure_charmm_ff(charmm_ff)
+    
+        
     acc_grad_batch = getattr(config_args, "acc_grad_batch", 1)
 
     all_dirs = load_dir.split()
@@ -384,20 +453,22 @@ if __name__ == "__main__":
     np.random.shuffle(full_trj_list)
     if args.test:
         full_trj_list = full_trj_list[:100]
-
+   
     res_list = []
     atom_list = []
     mask_list = []
     top_list = []
     ca_pos = []
+
     for trj_name in tqdm(full_trj_list):
         trj = md.load(trj_name)
-        res_ohe, atom_ohe, xyz, aa_to_cg, mask, n_atoms, top = load_features_pro(trj)
-        res_list.append(res_ohe)
-        atom_list.append(atom_ohe)
-        mask_list.append(mask)
-        top_list.append(top)
-        ca_pos.append(xyz[0, aa_to_cg])
+        if trj.top.n_residues < 100 and len(res_list) < 10000:
+            res_ohe, atom_ohe, xyz, aa_to_cg, mask, n_atoms, top = load_features_pro(trj)
+            res_list.append(res_ohe)
+            atom_list.append(atom_ohe)
+            mask_list.append(mask)
+            top_list.append(top)
+            ca_pos.append(xyz[0, aa_to_cg])
 
     pt_dataset = PostTrainDataset(res_list, atom_list, ca_pos, mask_list, top_list)
     train_loader = DataLoader(
@@ -423,12 +494,20 @@ if __name__ == "__main__":
         charmm_ff=config_args.charmm_ff,
         int_ff=int_ff,
         max_grad=MAX_GRAD,
-        t_flip=t_flip,
         job_dir=job_dir,
         selection_split=selection_split,
         compare=args.compare,
         test=args.test,
         agb=acc_grad_batch,
+        int_chi=int_chi,
+        gamma=gamma,
+        half_life=half_life,
+        use_angles=use_angles,
+        use_hbonds=use_hbonds,
+        rtp_data=rtp_data,
+        lj_data=lj_data,
+        bond_data=bond_data,
+        angle_data=angle_data,
     )
     if restart:
         module.model.load_state_dict(

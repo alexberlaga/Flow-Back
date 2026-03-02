@@ -7,13 +7,13 @@ name = "flow-back"
 version = "0.1.0"
 description = "FlowBack & FlowBack-Adjoint"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26,<2",
     "torch",
     "mdtraj",
     "pytorch-lightning",
-    "rdkit==2025.3.5",    
+    "rdkit>=2024",    
     "openmm",
     "scipy",
     "pandas",
@@ -23,7 +23,9 @@ dependencies = [
     "tqdm",
     "joblib",
     "MDAnalysis==2.8.0",
-    "pdbfixer @ git+https://github.com/openmm/pdbfixer.git"
+    "pdbfixer @ git+https://github.com/openmm/pdbfixer.git",
+    "openmm @ git+https://github.com/openmm/openmmforcefields.git@main",
+    "scikit-learn"
 ]
 
 [project.urls]

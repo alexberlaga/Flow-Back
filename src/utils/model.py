@@ -444,7 +444,7 @@ def get_prior(xyz, aa_to_cg, mask_idxs=None, scale=1.0, frames=None):
     if mask_idxs is not None:
         xyz_prior[:, mask_idxs] = xyz[:, mask_idxs]
     
-    return xyz_priorx
+    return xyz_prior
 
 
 def get_prior_mix(xyz, aa_to_cg, scale=1.0):

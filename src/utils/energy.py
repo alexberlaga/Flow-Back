@@ -75,8 +75,7 @@ def charmm_structure_to_energy(topology: md.Topology, xyz: np.ndarray, nonbonded
     # ff_dir = ensure_charmm_ff(ff_version)
     if np.max(compute_all_distances(t)) > 4 * t.top.n_residues ** 0.5:
         raise RuntimeError("Crazy Structure. Could Not Compute Energy")
-    with tempfile.TemporaryDirectory(prefix=fb_temp_dir()) as temp_dir:
-
+    with tempfile.TemporaryDirectory() as temp_dir:
         pdb_file = f'{temp_dir}/temp.pdb'
         t.save_pdb(pdb_file)
     # --- AMBER14 with implicit solvent (GBn2) ---
